@@ -2,6 +2,7 @@ import { Button, RadioCard, RadioGroup } from "@detour/ui";
 import { Clock } from "lucide-react";
 import { useState, type FormEvent } from "react";
 import { parseBlockedTarget } from "../../lib/blocked-target.ts";
+import { sendExtensionMessage } from "../../lib/runtime.adapter.ts";
 
 type DurationOption = "2" | "5" | "15";
 
@@ -13,19 +14,46 @@ const DURATIONS: readonly { value: DurationOption; label: string; description: s
 
 type BlockedPageProps = {
   search: string;
+  onNavigate?: (href: string) => void;
 };
 
-export function BlockedPage({ search }: BlockedPageProps) {
+export function BlockedPage({ search, onNavigate }: BlockedPageProps) {
   const target = parseBlockedTarget(search);
   const [duration, setDuration] = useState<DurationOption>("5");
   const [reason, setReason] = useState("");
-  const [submitted, setSubmitted] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
+  const [statusNote, setStatusNote] = useState<string | null>(null);
 
   const heading = target.ok ? target.value.host : "Detour gate";
 
-  function handleSubmit(event: FormEvent<HTMLFormElement>) {
+  async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    setSubmitted(true);
+    if (!target.ok) {
+      setStatusNote(`Requested ${duration} minutes.`);
+      return;
+    }
+
+    setSubmitting(true);
+    setStatusNote(null);
+    const trimmedReason = reason.trim();
+    const reply = await sendExtensionMessage({
+      type: "grant_access",
+      domain: target.value.host,
+      durationMinutes: Number(duration),
+      reason: trimmedReason,
+    });
+    setSubmitting(false);
+
+    if (!reply.ok || !reply.value.ok) {
+      setStatusNote("Could not install pass rule. Please try again.");
+      return;
+    }
+
+    setStatusNote(
+      `Pass ready for ${duration} minutes${trimmedReason ? ` ("${trimmedReason}")` : ""}. Opening site...`,
+    );
+    const navigate = onNavigate ?? ((href: string) => window.location.replace(href));
+    navigate(target.value.href);
   }
 
   return (
@@ -44,7 +72,7 @@ export function BlockedPage({ search }: BlockedPageProps) {
       </header>
 
       <form
-        onSubmit={handleSubmit}
+        onSubmit={(event) => void handleSubmit(event)}
         className="flex flex-col gap-4 rounded-xl border border-line bg-surface p-5"
       >
         <RadioGroup aria-label="Requested duration" value={duration} onValueChange={setDuration}>
@@ -69,16 +97,11 @@ export function BlockedPage({ search }: BlockedPageProps) {
           />
         </label>
 
-        <Button type="submit" variant="primary" size="lg">
+        <Button type="submit" variant="primary" size="lg" pending={submitting}>
           Request pass
         </Button>
 
-        {submitted ? (
-          <output className="text-sm text-fg-muted">
-            Requested {duration} minutes
-            {reason.trim() ? ` for "${reason.trim()}"` : ""}.
-          </output>
-        ) : null}
+        {statusNote ? <output className="text-sm text-fg-muted">{statusNote}</output> : null}
       </form>
     </main>
   );

@@ -2,13 +2,24 @@ import { describe, expect, it } from "vite-plus/test";
 import { parseBlockedTarget } from "./blocked-target.ts";
 
 describe("parseBlockedTarget", () => {
-  it("parses a valid https url query param", () => {
+  it("parses a percent-encoded https url query param", () => {
     const result = parseBlockedTarget("?url=https%3A%2F%2Fnews.ycombinator.com%2Fnewest");
     expect(result).toEqual({
       ok: true,
       value: {
         host: "news.ycombinator.com",
         href: "https://news.ycombinator.com/newest",
+      },
+    });
+  });
+
+  it("preserves full query strings injected verbatim by DNR regexSubstitution", () => {
+    const result = parseBlockedTarget("?url=https://example.com/search?a=1&b=2&c=3");
+    expect(result).toEqual({
+      ok: true,
+      value: {
+        host: "example.com",
+        href: "https://example.com/search?a=1&b=2&c=3",
       },
     });
   });

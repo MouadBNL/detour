@@ -1,0 +1,116 @@
+# ADR 0002: Cross-Browser MV3 DNR, Storage Isolation, Permissions & Expiry Spike (Spike 2)
+
+- **Status:** Accepted (Architecture verified live in Chrome 159 and Firefox 161)
+- **Date:** 2026-11-26
+- **Context:** Pre-build Spike 2 from `BRIEF.md`, building on ADR 0001 (`apps/extension` with WXT + Vite+)
+
+## Decision
+
+Adopt the following cross-browser MV3 architecture for Chrome and Firefox (`strict_min_version: "140.0"`):
+
+1. **DNR blocking as a pure projection of stored state (`src/lib/dnr-projection.ts`):**
+   - Persist blocklist rules as `declarativeNetRequest` **`dynamic`** rules (`priority: 1`, IDs `1000+`) using `requestDomains` + `regexFilter: "^(https?://.+)$"` + `regexSubstitution: "${browser.runtime.getURL('/blocked.html')}?url=\\1"` on `resourceTypes: ["main_frame"]`.
+   - Persist active grants as higher-priority **`session`** `allow` rules (`priority: 10`, IDs `2000+`), auto-clearing on browser restart while dynamic rules fail closed.
+   - Always list `blocked.html` under `web_accessible_resources` for `["http://*/*", "https://*/*"]` (**mandatory on Firefox**, even though Chrome 159 allows omitting it for `main_frame` redirects).
+   - Parse `?url=` in `blocked.html` with raw-prefix preservation before falling back to `URLSearchParams`, because DNR `regexSubstitution` injects `\1` verbatim without percent-encoding `&` query separators.
+   - Always `await` background confirmation of session allow-rule installation before `blocked.html` navigates back to the target URL (`window.location.replace`), avoiding redirect loops.
+2. **Minimal permissions & revocation (`declarativeNetRequestWithHostAccess`):**
+   - Declare only `["storage", "alarms", "declarativeNetRequestWithHostAccess", "scripting"]` in `permissions` and `["*://*/*"]` in `optional_host_permissions` (no upfront `host_permissions`, no `webNavigation`, no `tabs`).
+   - Request per-site origins (`*://<domain>/*`, `*://*.<domain>/*`) strictly inside user-gesture handlers, audit via `permissions.contains`, listen to `permissions.onAdded` / `permissions.onRemoved` to re-reconcile, and surface revoked domains with a one-click **Re-grant** action in the popup.
+3. **Storage access isolation (`TRUSTED_CONTEXTS`) & BYOK key security:**
+   - Keep a cross-browser feature-detecting adapter (`ensureTrustedStorageAccess()` in `src/lib/storage.adapter.ts`) that calls `storage.local.setAccessLevel({ accessLevel: "TRUSTED_CONTEXTS" })` on Chrome (`"enforced"`) and degrades cleanly without throwing on Firefox (`"unsupported"`).
+   - **Critical security finding:** Firefox 161 omits `storage.local.setAccessLevel` (Bug 1724754) and allows content scripts to read `browser.storage.local`. Therefore, **store BYOK API keys (and any future managed auth tokens) in extension-origin IndexedDB** (inaccessible to content scripts, which execute in the host page's origin) rather than `storage.local` alone—or keep `storage.local` strictly free of secrets on Firefox while enforcing `TRUSTED_CONTEXTS` on Chrome.
+4. **Expiry, alarms, idempotent `reconcile()`, and on-demand Shadow DOM overlay:**
+   - Store absolute `expiresAtMs` timestamps in `storage.local`, schedule a single next-expiry alarm (`detour:grant-expiry`), and run idempotent `reconcile()` on `worker-init`, `onInstalled`, `onStartup`, `alarms.onAlarm`, `permissions.onAdded`/`onRemoved`, and runtime messages.
+   - Use `sendResponse` + `return true` inside `runtime.onMessage` listeners (NOT returning a raw `Promise`), because WXT exposes raw `chrome.*` on Chrome MV3 where returned Promises are ignored.
+   - Sweep open tabs via `tabs.query({})` (without `"tabs"` permission, both Chrome and Firefox expose `tab.url` only for granted host origins and extension pages) and inject `/expiry-overlay.js` via `scripting.executeScript`, falling back to `tabs.update` redirect to `blocked.html` if injection fails.
+   - Style injected overlays with self-contained Shadow DOM CSS using explicit `px` units and `:host` custom properties (or an extension `<iframe>` if reusing `@detour/ui` Tailwind v4 directly), avoiding host-page `html { font-size }` `rem` scaling and Tailwind v4 `:root` / `@property` leakage.
+
+---
+
+## Verification Environment & Coverage
+
+| Target                              | Version / Runtime                                                                                                                               | What Was Verified                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| ----------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Google Chrome for Testing**       | `159.0.8154.6` (Playwright persistent context, `--headless=new`, local HTTP server on `127.0.0.1` via `.localhost` subdomains)                  | Live: minimal permissions, ungranted no-intercept + `tabs.query` URL privacy, `storage.local.setAccessLevel("TRUSTED_CONTEXTS")` blocking content script reads, DNR `dynamic` redirect to `chrome-extension://…/blocked.html` (apex + subdomain + `&` query params), `session` allow rule priority + zero redirect loop, `alarms`, `reconcile()` tab sweep, `scripting.executeScript` Shadow DOM overlay CSS isolation on hostile host page, 2m wrap-up + follow-up redirect, negative check without `web_accessible_resources`.                                                                                                                                                                              |
+| **Mozilla Firefox**                 | `161.0` (`/snap/firefox/current/usr/lib/firefox/firefox --headless --marionette`, local HTTP server on `127.0.0.1` via `.localhost` subdomains) | Live: minimal permissions, ungranted no-intercept + `tabs.query` URL privacy, `permissions.request` user-gesture enforcement, `storage.local.setAccessLevel === undefined` (`"unsupported"` without throwing) + content script `storage.local` readability probe, DNR `isRegexSupported` + `dynamic` redirect to `moz-extension://…/blocked.html` (apex + subdomain + `&` query params), `session` allow rule priority + zero redirect loop, `alarms`, `reconcile()` tab sweep, `scripting.executeScript` Shadow DOM overlay CSS isolation on hostile host page, 2m wrap-up, live `permissions.remove` firing `permissions.onRemoved` -> `revokedDomains`, negative check without `web_accessible_resources`. |
+| **Unit & DOM Tests**                | Vitest `5.1.0` + `WxtVitest` + `fakeBrowser` + Testing Library (`happy-dom`)                                                                    | 6 test files / 19 tests covering `parseBlockedTarget`, `projectDnrRules`, `storage.adapter` (`enforced` / `unsupported` / rejection), `reconcile` + overlay fallback to redirect + message controller, `BlockedPage` await-before-redirect, and `PopupApp` permission + revocation UI.                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| **Production Builds & Repo Checks** | WXT `0.21.5`, Vite `8.3.7` / Rolldown, `pnpm check`                                                                                             | `chrome-mv3` + `firefox-mv3` manifests and bundles (`background.js`, `blocked.html`, `popup.html`, `expiry-overlay.js`), plus full monorepo `pnpm check`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+
+_Note on interactive native permission prompts:_ Headless browser runs do not click OS-level permission prompt dialogs. On Firefox 161, optional origins were granted via Gecko's `ExtensionPermissions.add` (matching a real optional host grant) and revoked live via `browser.permissions.remove` to trigger `permissions.onRemoved`. On Chrome 159, Scenario A verified the unmodified minimal-permission manifest (confirming `permissions.request` opens the native prompt and ungranted hosts are not intercepted), while Scenario B patched `host_permissions` on a temporary copy to exercise the full post-grant DNR, `TRUSTED_CONTEXTS`, and overlay pipeline.
+
+---
+
+## Live Findings & Cross-Browser Discrepancies
+
+### 1. DNR Blocking, `regexSubstitution`, and `web_accessible_resources`
+
+| Check                                                                               | Chrome 159 (`chrome-mv3`)                                                                                                                      | Firefox 161 (`firefox-mv3`)                                                                                                                                                                      |
+| ----------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `requestDomains: ["distraction.localhost"]` + `regexFilter: "^(https?://.+)$"`      | Redirected apex (`distraction.localhost`) and subdomain (`sub.distraction.localhost`) to `chrome-extension://<id>/blocked.html?url=http://...` | `isRegexSupported({ regex: "^(https?://.+)$", requireCapturing: true })` returned `{ isSupported: true }`; redirected apex and subdomain to `moz-extension://<uuid>/blocked.html?url=http://...` |
+| Multi-parameter query string (`?a=1&b=2`)                                           | Injected verbatim (`?url=http://distraction.localhost:<port>/feed?a=1&b=2`); `parseBlockedTarget` raw-prefix branch preserved `&b=2`           | Identical verbatim injection; `parseBlockedTarget` preserved `&b=2`                                                                                                                              |
+| Higher-priority `session` `allow` rule (`priority: 10 > 1`) + await before redirect | Landed cleanly on `http://distraction.localhost:<port>/feed?a=1&b=2` with zero redirect loop                                                   | Landed cleanly on `http://distraction.localhost:<port>/feed?a=1&b=2` with zero redirect loop                                                                                                     |
+| **Omitting `web_accessible_resources`**                                             | **Still redirected** to `chrome-extension://<id>/blocked.html` (Chrome does not block `main_frame` DNR redirect without WAR)                   | **Stalled / blocked navigation** (`Navigation timed out after 4000 ms`, tab remained on `about:blank`)                                                                                           |
+
+**Key takeaway:** Always test `web_accessible_resources` on Firefox; Chrome silently masks a missing WAR declaration for top-level DNR redirects.
+
+### 2. Minimal Permissions (`declarativeNetRequestWithHostAccess`) & Revocation
+
+- **Install permissions verified live:** Both manifests install with zero `origins` (`permissions: ["storage", "alarms", "declarativeNetRequestWithHostAccess", "scripting"]`, `optional_host_permissions: ["*://*/*"]`).
+- **Enforcement without host grant:** Installing a dynamic redirect rule for `distraction.localhost` without host permission succeeds (`dynamicRuleCount: 1`), `auditSitePermissions` marks it in `revokedDomains`, and navigating to `distraction.localhost` is **not** intercepted in either browser.
+- **`tabs.query({})` privacy without `"tabs"` permission:** In both Chrome 159 and Firefox 161, ungranted web tabs return `url: null` (omitted), while extension pages and granted-origin tabs expose `url`. This confirms open-tab expiry sweeps do **not** require the broad `"tabs"` permission.
+- **User gesture & revocation:** Calling `permissions.request` outside a user input handler threw `"Error: permissions.request may only be called from a user input handler"` on Firefox 161 and awaited a native prompt on Chrome 159. Calling `browser.permissions.remove` on Firefox 161 fired `permissions.onRemoved` with `{ permissions: [], origins: ["*://distraction.localhost/*", "*://*.distraction.localhost/*"], data_collection: [] }`, triggering `reconcile()` to move `distraction.localhost` into `revokedDomains`.
+
+### 3. Storage Access Isolation (`TRUSTED_CONTEXTS`)
+
+| Check                                                            | Chrome 159                                                                                          | Firefox 161                                                              |
+| ---------------------------------------------------------------- | --------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------ |
+| `typeof browser.storage.local.setAccessLevel`                    | `"function"`                                                                                        | `"undefined"`                                                            |
+| `ensureTrustedStorageAccess()` result                            | `ok("enforced")`                                                                                    | `ok("unsupported")` (no runtime error)                                   |
+| Content script calling `storage.local.get("detour:guard-state")` | **Blocked:** threw `Error: Access to storage is not allowed from this context.` (`readable: false`) | **Allowed:** returned `{ readable: true, keys: ["detour:guard-state"] }` |
+
+**Architectural recommendation:** Keep `ensureTrustedStorageAccess()` in `storage.adapter.ts` so Chrome always enforces `TRUSTED_CONTEXTS`, **and** store sensitive credentials (OpenRouter BYOK API keys, auth tokens) in **extension-origin IndexedDB** (accessible only to `chrome-extension://` / `moz-extension://` pages and background workers—never to content scripts, which execute in the web page's origin in both Chrome and Firefox). Also keep `apps/extension` free of persistent content scripts; only `expiry-overlay.ts` runs on-demand and never imports `storage.adapter.ts`.
+
+### 4. Expiry, Alarms, SW/Event-Page Reconciliation & On-Demand Overlay
+
+- **Messaging nuance (Chrome vs. Firefox):** WXT's `browser` export uses native `chrome.*` on Chrome MV3 (no `webextension-polyfill`). Returning a `Promise` from `runtime.onMessage.addListener` resolves to `undefined` on Chrome. Using `void handler(msg, sender).then(sendResponse); return true;` in `src/lib/runtime.adapter.ts` worked identically in both Chrome 159 and Firefox 161.
+- **Alarms + absolute timestamps:** `browser.alarms.create("detour:grant-expiry", { when: expiresAtMs })` created the expected alarm on both browsers (Chrome reports `persistAcrossSessions: true`; Firefox reports `periodInMinutes: null`). Reconciliation always evaluates `expiresAtMs <= nowMs`, so SW/event-page suspension or missed alarms self-heal on next wake.
+- **`scripting.executeScript` + Shadow DOM on hostile CSS page:**
+  - Served a target page with `html { font-size: 10px !important; }` and `* { color: rgb(255, 0, 0) !important; font-family: cursive !important; }`.
+  - On expiry, `reconcile()` cleared the session allow rule (`sessionRuleCount: 0`), cleared the alarm, swept the open tab via `tabs.query({})`, and injected `/expiry-overlay.js` via `scripting.executeScript`.
+  - Both **Chrome 159** and **Firefox 161** mounted `#detour-expiry-overlay-host` with:
+    - Host `html` font-size: `10px`, host heading color: `rgb(255, 0, 0)`.
+    - Overlay `.detour-title` computed font-size: **`18px`** (immune to host `rem` distortion) and color **`oklch(0.21 0.006 286)`** (immune to host `!important` global rules).
+    - Quoted stated reason rendered verbatim (`You came here for "verify chrome/firefox spike 2".`).
+  - Clicking `"2 more minutes to wrap up"` removed the overlay and re-installed a `session` allow rule (`sessionRuleCount: 1`); clicking `"Got what I came for"` redirected the tab back to `blocked.html`.
+
+#### Overlay vs. Redirect Trade-off (Shadow DOM / Tailwind v4 `:root` & `rem`)
+
+- **Why Tailwind v4 directly inside a Shadow Root has friction:** `@detour/ui/styles.css` defines `--text-*` and spacing utilities in **`rem`**, and Tailwind v4 emits `@property` declarations and `:root` tokens. Inside a Shadow DOM attached to an arbitrary host webpage:
+  1. `1rem` always resolves against the **host document's `<html>` font-size** (e.g. `10px` on `62.5%`-reset sites), shrinking or inflating every Tailwind spacing/font utility unless rewritten to `px` at build time.
+  2. `@property` rules declared inside a `<style>` tag inside a Shadow Root do not register globally in all engines, breaking Tailwind utilities that depend on registered custom properties (gradients, ring/shadow vars).
+- **Clean options for v1 product build:**
+  - **Option 1 (Recommended if choosing in-page overlay for draft preservation):** Inject a lightweight shell via `scripting.executeScript` that mounts a full-viewport **`<iframe>`** pointing to a web-accessible `expiry-overlay.html` extension page (or keep the dedicated `px`-only Shadow DOM stylesheet as prototyped in `src/lib/expiry-overlay.css`). An extension `<iframe>` gets its own `:root` (`1rem = 16px`), full `@detour/ui` Tailwind v4 + React 19 reuse, zero host CSS interference, and preserves the host page's unsaved form drafts underneath.
+  - **Option 2 (Simplest zero-`scripting` fallback):** Redirect open tabs directly to `blocked.html?mode=expired&url=...` on expiry (`expiredAction: "redirect"`). Eliminates the `"scripting"` permission entirely and avoids any page injection surface, at the cost of navigating away from unsaved drafts.
+  - Both paths already work cleanly in `reconcile()` (`expiredAction: "overlay" | "redirect"`), with automatic redirect fallback if `executeScript` fails on restricted pages.
+
+---
+
+## What Was Built in `apps/extension/`
+
+- `wxt.config.ts`: MV3 manifest with `storage`, `alarms`, `declarativeNetRequestWithHostAccess`, `scripting`, `optional_host_permissions: ["*://*/*"]`, and `web_accessible_resources` for `blocked.html`.
+- `src/lib/guard-state.ts`, `src/lib/dnr-projection.ts`, `src/lib/blocked-target.ts`, `src/lib/messages.ts`: Pure state normalization, DNR dynamic/session projection, raw-prefix `regexSubstitution` URL parsing, and typed runtime message parsing.
+- `src/lib/storage.adapter.ts`, `src/lib/dnr.adapter.ts`, `src/lib/permissions.adapter.ts`, `src/lib/alarms.adapter.ts`, `src/lib/tabs-scripting.adapter.ts`, `src/lib/runtime.adapter.ts`: Result-returning cross-browser MV3 adapters (`*.adapter.ts`).
+- `src/lib/reconcile.ts`, `src/lib/background-controller.ts`: Idempotent state-to-DNR/alarm/tab reconciler and background message dispatcher.
+- `src/entrypoints/background.ts`, `src/entrypoints/expiry-overlay.ts` (+ `src/lib/expiry-overlay.css`), `src/entrypoints/blocked/blocked-page.tsx`, `src/entrypoints/popup/` (`popup-app.tsx`, `site-list.tsx`, `use-popup-status.effect.ts`): Entrypoints exercising every Spike 2 capability cleanly under repo guardrails.
+
+## Commands & Verification Results
+
+| Command                                                                  | Result | Key Output                                                                                       |
+| ------------------------------------------------------------------------ | ------ | ------------------------------------------------------------------------------------------------ |
+| `vp -C apps/extension test`                                              | Pass   | 6 test files, 19 tests (unit + DOM with `WxtVitest` & `fakeBrowser`)                             |
+| `vp -C apps/extension run build`                                         | Pass   | `chrome-mv3` (565.98 kB; `background.js`, `blocked.html`, `popup.html`, `expiry-overlay.js`)     |
+| `vp -C apps/extension run build:firefox`                                 | Pass   | `firefox-mv3` (566.12 kB; event page `background.scripts` + `gecko.data_collection_permissions`) |
+| Live Chrome `159.0.8154.6` harness (`verify-chrome.mjs`)                 | Pass   | Scenarios A, B, C verified end-to-end                                                            |
+| Live Firefox `161.0` harness (`verify-firefox.mjs` + WAR negative check) | Pass   | Scenarios A, B, C verified end-to-end                                                            |
+| `pnpm check`                                                             | Pass   | Full monorepo format, lint, typecheck, boundaries, tests, canary, Knip, jscpd                    |

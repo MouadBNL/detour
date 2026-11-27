@@ -1,0 +1,92 @@
+/*
+ * Self-contained Shadow DOM stylesheet for the on-demand expiry overlay.
+ *
+ * Uses explicit px units and local :host variables instead of rem / :root Tailwind v4 variables
+ * so host pages that override `html { font-size: 10px }` or apply `!important` global rules cannot
+ * distort typography, spacing, or color tokens inside the shadow root.
+ */
+:host {
+  all: initial;
+  position: fixed;
+  inset: 0;
+  z-index: 2147483647;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(15, 16, 20, 0.72);
+  backdrop-filter: blur(6px);
+  color-scheme: light dark;
+  font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  font-size: 13px;
+  line-height: 20px;
+  --detour-surface: light-dark(oklch(1 0 0), oklch(0.185 0.004 286));
+  --detour-canvas: light-dark(oklch(0.975 0.002 286), oklch(0.155 0.004 286));
+  --detour-fg: light-dark(oklch(0.21 0.006 286), oklch(0.93 0.003 286));
+  --detour-fg-muted: light-dark(oklch(0.48 0.008 286), oklch(0.72 0.006 286));
+  --detour-line: light-dark(oklch(0.2 0.01 286 / 0.12), oklch(1 0 0 / 0.12));
+  --detour-accent: light-dark(oklch(0.54 0.16 276), oklch(0.58 0.15 276));
+  --detour-accent-fg: oklch(0.99 0 0);
+}
+
+.detour-card {
+  box-sizing: border-box;
+  width: min(400px, calc(100vw - 32px));
+  padding: 20px;
+  border-radius: 12px;
+  border: 1px solid var(--detour-line);
+  background: var(--detour-surface);
+  color: var(--detour-fg);
+  box-shadow: 0 20px 50px rgba(0, 0, 0, 0.32);
+}
+
+.detour-eyebrow {
+  margin: 0 0 4px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--detour-accent);
+}
+
+.detour-title {
+  margin: 0 0 8px;
+  font-size: 18px;
+  line-height: 24px;
+  font-weight: 600;
+  color: var(--detour-fg);
+}
+
+.detour-quote {
+  margin: 0 0 16px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: var(--detour-canvas);
+  color: var(--detour-fg-muted);
+  font-size: 13px;
+  line-height: 18px;
+}
+
+.detour-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.detour-btn {
+  appearance: none;
+  border: 1px solid var(--detour-line);
+  border-radius: 8px;
+  padding: 9px 12px;
+  background: var(--detour-canvas);
+  color: var(--detour-fg);
+  font: inherit;
+  font-size: 13px;
+  font-weight: 500;
+  text-align: left;
+  cursor: pointer;
+}
+
+.detour-btn-primary {
+  border-color: transparent;
+  background: var(--detour-accent);
+  color: var(--detour-accent-fg);
+  text-align: center;
+}
