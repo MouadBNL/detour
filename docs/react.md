@@ -17,7 +17,7 @@ apps/web/src/
   features/<name>/
     index.ts            the feature's public API; other features and routes import only this
     components/         rendering and wiring: props in, JSX out, events to hooks
-    hooks/              stateful logic (useActionState, useSyncExternalStore, router/query wiring)
+    hooks/              stateful logic (useForm, useMutation, useSyncExternalStore, router wiring)
     model/              pure logic: plain functions over plain data, tested without a DOM
     api/                data access: query options, oRPC calls, localStorage
   lib/                  cross-feature plumbing: oRPC client (orpc.ts), failure types
@@ -99,16 +99,16 @@ A component renders props and wires events. Anything else moves out:
 | It is...                                          | It goes in    | Example                                         |
 | ------------------------------------------------- | ------------- | ----------------------------------------------- |
 | a calculation, a validation, a decision, a format | `model/`      | `parseThemePreference`, `describeHealthFailure` |
-| state that outlives a render, or React wiring     | `hooks/`      | `useThemePreference`, a form's action           |
+| state that outlives a render, or React wiring     | `hooks/`      | `useThemePreference`, a form's `useForm`        |
 | a request, storage, anything that leaves the page | `api/`        | `healthQuery`, `theme-preference.ts`            |
 | markup and event wiring                           | `components/` | `SystemStatus`                                  |
 
 ```tsx
 // Good: the component only renders; the hook owns the action, model/ the validation.
 export function NewNoteForm() {
-  const [state, formAction, pending] = useCreateNote();
+  const { form, pending } = useNewNoteForm();
   return (
-    <form action={formAction}>
+    <form noValidate onSubmit={(event) => { event.preventDefault(); void form.handleSubmit(); }}>
       ...
       <Button type="submit" variant="primary" pending={pending}>
         {pending ? "Saving…" : "Save note"}
@@ -156,7 +156,7 @@ useEffect(() => setOthers(build(current)), [current]); // also fails repo/no-eff
 | Server data                            | TanStack Query cache                                | `healthQuery`                              |
 | Facts every route below needs          | Router context, set in `beforeLoad`                 | the session, once there is one             |
 | A value owned outside React            | `useSyncExternalStore` over a small store in `api/` | theme preference (localStorage + `<html>`) |
-| A form being filled                    | The DOM (uncontrolled inputs) + `useActionState`    | any form                                   |
+| A form being filled                    | `@tanstack/react-form` (`useForm`), see "Forms"     | any form                                   |
 | Ephemeral UI (open, hovered, selected) | `useState` in the lowest component that needs it    | a menu's open state                        |
 
 - **Colocate first.** Put state in the component that uses it. Lift it to the closest common parent
@@ -165,8 +165,8 @@ useEffect(() => setOthers(build(current)), [current]); // also fails repo/no-eff
 - **Reset with a key, not an effect.** To start a subtree fresh when an identity changes, give it a
   key: `<Editor key={thing.id} thing={thing} />`. Do not watch the id in an effect and reset
   fields by hand.
-- **Uncontrolled by default** for form fields; control an input only when something must react to
-  each keystroke (a filter box). Base UI components accept both.
+- **Form fields belong to the form**: bind them to `form.Field` (see "Forms"). Do not copy field
+  values into `useState`.
 
 ## Effects
 
@@ -254,8 +254,8 @@ the layout does not jump.
   navigations never flash.
 - **A loading state is acceptable** only for data that cannot be preloaded (first visit, search
   results as you type) and never for a whole screen that a loader could have fetched.
-- **Writes**: a form action (`useActionState`, see "Forms") or `useMutation` in a hook, calling a
-  function from the feature's `api/` that returns a `Result`, then
+- **Writes**: `useMutation` in a hook (behind a form, see "Forms"), calling a function from the
+  feature's `api/` that returns a `Result`, then
   `queryClient.invalidateQueries({ queryKey })` (or `setQueryData` with what the server returned).
   For writes that must apply in the same frame and roll back on failure, see "Recipe: local data
   with optimistic writes".
@@ -264,51 +264,69 @@ the layout does not jump.
 
 ## Forms
 
-The template has no form yet and no form primitives in `packages/ui` (no `Form`, `Field`,
-`Input`); add the controls you need with `docs/architecture.md`, "Recipe: a UI primitive". The
-pattern, whatever the primitives:
+Forms use `@tanstack/react-form` with a Zod schema passed as a Standard Schema validator. It runs
+under the React Compiler and passes the `react/*` rules with no workaround (no suppression, no
+bailout). The working examples are in `apps/extension`: `popup/use-add-site-form.ts` with
+`add-site-form.tsx`, and `blocked/use-request-pass.ts` with `pass-form.tsx`. `packages/ui` has no
+`Input` or `Field` yet; add one with `docs/architecture.md`, "Recipe: a UI primitive", when a
+second form needs it.
 
 ```tsx
-// model/notes.ts: one validator, on the contract's own schema; the messages are worded here.
-export function validateNewNote(fields: NoteFields): Result<NoteFields, Invalid> {
-  const parsed = NewNote.safeParse(fields); // NewNote from @detour/contracts
-  if (parsed.success) return ok(parsed.data);
-  ...map each issue to a sentence per field ("Enter a title.")
+// model/notes.ts (or the contract): one schema, with the messages worded on it.
+export const newNoteFormSchema = z.object({
+  title: NewNote.shape.title.min(1, "Enter a title."), // NewNote from @detour/contracts
+});
+
+// hooks/use-new-note-form.ts: the form validates on submit, then hands the values to a mutation.
+export function useNewNoteForm() {
+  const createNote = useCreateNote(); // useMutation over an api/ function that returns a Result
+  const form = useForm({
+    defaultValues: { title: "" },
+    validators: { onSubmit: newNoteFormSchema },
+    onSubmit: ({ value }) => createNote.mutate(value),
+  });
+  return { form, pending: createNote.isPending, outcome: createNote.data ?? null };
 }
 
-// hooks/use-create-note.ts: the action validates, calls api/, and returns the next form state.
-return useActionState(async (_previous: NewNoteState, data: FormData) => {
-  const values = { title: text(data, "title"), body: text(data, "body") };
-  const input = validateNewNote(values);
-  if (!input.ok) return { values, errors: input.error.fields, formError: null };
-  const created = await createNote(input.value); // api/notes.ts, returns a Result
-  if (!created.ok) return afterCreateFailure(values, created.error); // model/: field or form error
-  await queryClient.invalidateQueries({ queryKey: notesQuery.queryKey });
-  return EMPTY_NEW_NOTE;
-}, EMPTY_NEW_NOTE);
-
-// components/new-note-form.tsx: errors as values, the label tied to its input.
-<form action={formAction}>
-  <label htmlFor={`${id}-title`}>Title</label>
-  <Input id={`${id}-title`} name="title" defaultValue={state.values.title}
-    invalid={state.errors.title !== undefined} aria-describedby={...} />
-  {state.errors.title === undefined ? null : <p id={...}>{state.errors.title}</p>}
-  {state.formError === null ? null : <p role="alert">{state.formError}</p>}
+// components/new-note-form.tsx: the field's errors as values, the label tied to its input.
+<form noValidate onSubmit={(event) => { event.preventDefault(); void form.handleSubmit(); }}>
+  <form.Field name="title">
+    {(field) => {
+      const error = field.state.meta.errors[0]?.message;
+      return (<>
+        <label htmlFor={titleId}>Title</label>
+        <input id={titleId} name={field.name} value={field.state.value}
+          onBlur={field.handleBlur} onChange={(event) => field.handleChange(event.target.value)}
+          aria-invalid={error === undefined ? undefined : true}
+          aria-describedby={error === undefined ? undefined : errorId} />
+        {error === undefined ? null : <p id={errorId}>{error}</p>}
+      </>);
+    }}
+  </form.Field>
+  {outcome?.ok === false ? <p role="alert">{describeFailure(outcome.error)}</p> : null}
 ```
 
-- One validator: the `model/` function. Do not add native constraints (`required`,
-  `type="email"`, `minLength`): the browser would run its check first and show its message
-  instead of ours. Use `inputMode` and `autoComplete` for the keyboard and autofill.
-- Bounds come from the contract: a field the API takes is checked with the contract's own Zod
-  schema (imported from `@detour/contracts`, exported from its `index.ts`), with the messages
-  worded in `model/`. Never restate a length or a pattern on the web: it drifts from the server's.
+- One validator: the schema in `validators.onSubmit`. Its issues land on the matching fields
+  (`field.state.meta.errors`). Do not add native constraints (`required`, `type="email"`,
+  `minLength`): the browser would run its own check first and show its own message instead of
+  ours. Use `noValidate`, `inputMode` and `autoComplete`.
+- Bounds come from the contract: build the form schema from the contract's own Zod schema
+  (imported from `@detour/contracts`) and word the messages there. Never restate a length or a
+  pattern on the client: it drifts from the server's.
+- The write is a `useMutation` whose `mutationFn` returns the `Result`. Keep it in
+  `mutation.data` and render from that. Do not unwrap it into a throw. On success, update the cache
+  (`setQueryData` with what the server returned, or `invalidateQueries`) and `formApi.reset()`.
+  Each action owns its own pending state (`mutation.isPending`); there is no shared `busy` flag.
 - A refusal the user fixes on one field (a taken title) goes under that field; any other failure
-  of the request goes above the submit button, `role="alert"`.
-- Echo submitted values back through `defaultValue` so a failed attempt keeps what was typed.
+  of the request goes above or below the submit button, `role="alert"`. A failed attempt keeps
+  what was typed, because the form resets only on success.
 - Messages say what to do: "Enter a title.", not "Invalid input".
 - Tie each label to its control with `htmlFor` and the control's `id` (`useId()`):
   `jsx-a11y/label-has-associated-control` **[check]** does not see a design-system `Input`
   wrapped in a `<label>` as a control.
+- Work that needs the user gesture (a browser permission prompt) starts in the native `onSubmit`
+  or `onClick` handler, before `form.handleSubmit()` or anything else is awaited. Pass the started
+  promises to the submit through `onSubmitMeta` (see `use-add-site-form.ts`).
 
 ## Errors on the client
 

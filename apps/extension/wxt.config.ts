@@ -10,7 +10,14 @@ export default defineConfig({
   manifest: ({ browser }) => ({
     name: "Detour",
     description: "An intentional speed bump for distracting websites.",
-    permissions: ["storage"],
+    permissions: ["storage", "alarms", "declarativeNetRequestWithHostAccess", "scripting"],
+    optional_host_permissions: ["*://*/*"],
+    web_accessible_resources: [
+      {
+        resources: ["blocked.html"],
+        matches: ["http://*/*", "https://*/*"],
+      },
+    ],
     ...(browser === "firefox"
       ? {
           browser_specific_settings: {

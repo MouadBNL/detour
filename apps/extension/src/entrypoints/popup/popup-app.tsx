@@ -1,47 +1,47 @@
-import { Button } from "@detour/ui";
-import { Pause, Play, Shield } from "lucide-react";
-import { useState } from "react";
-import { writePausedState } from "../../lib/storage.adapter.ts";
+import { Skeleton } from "@detour/ui";
+import { Shield } from "lucide-react";
+import { describeExtensionApiError } from "../../lib/extension-api.ts";
+import { AddSiteForm } from "./add-site-form.tsx";
+import { PauseToggle } from "./pause-toggle.tsx";
+import { SiteList } from "./site-list.tsx";
+import { usePopupStatus } from "./use-popup-queries.ts";
 
 export function PopupApp() {
-  const [paused, setPaused] = useState(false);
-  const [saving, setSaving] = useState(false);
-  const [statusNote, setStatusNote] = useState<string | null>(null);
-
-  async function handleTogglePause() {
-    setSaving(true);
-    setStatusNote(null);
-    const nextPaused = !paused;
-    const result = await writePausedState(nextPaused);
-    setSaving(false);
-    if (!result.ok) {
-      setStatusNote("Could not save pause state.");
-      return;
-    }
-    setPaused(result.value);
-    setStatusNote(result.value ? "Detour is paused." : "Detour is active.");
-  }
+  const { data: status, error, isPending } = usePopupStatus();
+  const paused = status?.state.paused ?? false;
 
   return (
-    <main className="flex w-72 flex-col gap-3 bg-canvas p-4 text-fg">
-      <header className="flex items-center gap-2">
-        <Shield className="size-4 text-accent" aria-hidden="true" />
-        <h1 className="text-lg font-semibold">Detour</h1>
+    <main className="flex w-80 flex-col gap-3 bg-canvas p-4 text-fg">
+      <header className="flex items-center justify-between gap-2">
+        <div className="flex items-center gap-2">
+          <Shield className="size-4 text-accent" aria-hidden="true" />
+          <h1 className="text-lg font-semibold">Detour</h1>
+        </div>
+        {status ? (
+          <span className="text-xs text-fg-subtle">
+            {status.dynamicRuleCount} rules · {status.storageAccess}
+          </span>
+        ) : null}
       </header>
       <p className="text-sm text-fg-muted">
         {paused
           ? "Interceptions are paused for now."
           : "Active on your guarded sites. Take a breath before you detour."}
       </p>
-      <Button
-        variant={paused ? "primary" : "secondary"}
-        pending={saving}
-        onClick={() => void handleTogglePause()}
-      >
-        {paused ? <Play aria-hidden="true" /> : <Pause aria-hidden="true" />}
-        {paused ? "Resume Detour" : "Pause Detour"}
-      </Button>
-      {statusNote ? <output className="text-xs text-fg-muted">{statusNote}</output> : null}
+      {isPending ? (
+        <>
+          <p className="sr-only">Loading Detour status…</p>
+          <Skeleton className="h-8 w-full" />
+        </>
+      ) : null}
+      {status ? <PauseToggle paused={paused} /> : null}
+      <AddSiteForm />
+      {status ? <SiteList sites={status.sites} /> : null}
+      {error ? (
+        <p role="alert" className="text-xs text-danger">
+          Could not load Detour status. {describeExtensionApiError(error)}
+        </p>
+      ) : null}
     </main>
   );
 }

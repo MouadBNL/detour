@@ -220,9 +220,10 @@ unshipped migration.
    The output type comes from the client: `type Note = Awaited<ReturnType<typeof api.notes.create>>`.
    Verify: `vp -C apps/web check` (a procedure the contract does not have does not compile).
 
-4. **Hooks** in `hooks/use-<action>.ts`: a form action with `useActionState` that validates with
-   the model, calls `api/`, maps a failure to form state with the model, and on success
-   invalidates the query (`queryClient.invalidateQueries({ queryKey: notesQuery.queryKey })`).
+4. **Hooks** in `hooks/use-<action>.ts`: a `@tanstack/react-form` hook backed by a `useMutation`
+   that validates with the contract's Zod schema (`validators.onSubmit`), calls `api/` (returning a
+   `Result` stored in `mutation.data`), and on success updates or invalidates the query
+   (`queryClient.invalidateQueries({ queryKey: notesQuery.queryKey })`) and resets the form.
 5. **Components** in `components/<name>.tsx`, one exported component per file: `useQuery(...)`
    with pending (`Skeleton`), error (the model's sentence) and data branches; the form with
    labels tied to inputs by `htmlFor`/`id` (`useId()`), errors under their field, a request
