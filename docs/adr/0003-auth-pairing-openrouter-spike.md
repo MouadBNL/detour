@@ -212,4 +212,4 @@ After the review round (2026-11-28):
 Proceed to **v1 implementation** on **Cloudflare Workers + D1 + WorkOS AuthKit**:
 
 - Deploy with `pnpm -C apps/api ship` (remote D1 migrations, then `wrangler deploy`) after `wrangler d1 create detour` fills in `database_id`; add `apps/web` static assets to the same Worker (`assets` in `wrangler.jsonc`) when the web app ships.
-- Persist the extension's `dtr_...` bearer token and BYOK OpenRouter key into `storage.local` under `TRUSTED_CONTEXTS` once Spike 2 lands, and build `credit_ledger` + `/decide` on top of the D1 schema using atomic conditional updates + `UNIQUE (idempotency_key)`.
+- Persist the extension's `dtr_...` bearer token and BYOK OpenRouter key in extension-origin IndexedDB, owned by the background (ADR 0002, Decision item 3; not `storage.local`, which Firefox exposes to content scripts), and build `credit_ledger` + `/decide` on top of the D1 schema using atomic conditional updates + `UNIQUE (idempotency_key)`.
