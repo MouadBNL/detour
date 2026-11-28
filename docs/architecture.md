@@ -4,9 +4,10 @@
 
 ```
 apps/
-  api/                      @detour/api: Node + Hono + oRPC
-    src/main.ts             process entry: loads env, opens + migrates the db, serves, drains
-    src/env.ts              the only reader of process.env (Zod schema)
+  api/                      @detour/api: Cloudflare Worker (Wrangler) + Hono + oRPC
+    wrangler.jsonc          the Worker: entry, compatibility, D1 binding, migrations, dev port
+    src/worker.ts           Worker entry: parses bindings, builds Deps (D1, WorkOS), runs the app
+    src/env.ts              the only reader of configuration (Zod schema over the bindings)
     src/app.ts              createApp(deps): oRPC on /rpc, a 500 for defects
     src/router.ts           root router: { system: systemRouter, ... }
     src/context.ts          Deps (db, now, lifecycle) and the per-request Context
@@ -26,14 +27,14 @@ packages/
   ui/                       @detour/ui: design tokens (src/styles.css) + Base UI primitives
   result/                   @detour/result: Result type, ok/err, fromThrowable/fromPromise
   contracts/                @detour/contracts: Zod schemas + the oRPC contract + shared errors
-  db/                       @detour/db: createDb(), tryQuery, schema/ (no tables), migrations/, ./testing
+  db/                       @detour/db: createD1Db(), tryQuery, schema/, migrations/, ./testing (node:sqlite)
 tools/
   oxlint-plugin/            @detour/oxlint-plugin: the repo's lint rules (repo/*)
   canary/                   @detour/canary: lints violating samples with the root config (docs/testing.md)
   rename-scope/             @detour/rename-scope: `node tools/rename-scope/src/main.ts <name>`
   workspace-check/          @detour/workspace-check: every dependency is `catalog:` or `workspace:*`
-e2e/                        @detour/e2e: Playwright journeys (`pnpm e2e`), `pnpm test:postgres`;
-                            imports no app code, starts them as processes (docs/testing.md)
+e2e/                        @detour/e2e: Playwright journeys (`pnpm e2e`); imports no app code,
+                            starts them as processes (`wrangler dev`, docs/testing.md)
 .vite-hooks/pre-commit      `vp staged` (the `staged` block of the root vite.config.ts)
 .claude/                    Claude Code project settings: allowed commands, format-on-edit hook
 .github/workflows/ci.yml    `pnpm check` and `pnpm e2e` on pushes to main and pull requests
@@ -104,28 +105,29 @@ reads (`packages/db/drizzle.config.ts`).
    export the name as a constant so a repo compares with it, not with a string:
 
    ```ts
-   import { pgTable, text, timestamp, unique, uuid } from "drizzle-orm/pg-core";
+   import { integer, sqliteTable, text, uniqueIndex } from "drizzle-orm/sqlite-core";
 
-   export const NOTES_TITLE_UNIQUE = "notes_title_unique";
+   /** `tryQuery` names a unique violation `<table>.<column>`, as SQLite reports it. */
+   export const NOTES_TITLE_UNIQUE = "notes.title";
 
-   export const notes = pgTable(
+   export const notes = sqliteTable(
      "notes",
      {
-       id: uuid("id").primaryKey().defaultRandom(),
+       id: text("id").primaryKey(),
        title: text("title").notNull(),
        body: text("body").notNull(),
-       createdAt: timestamp("created_at", { withTimezone: true }).notNull(),
+       createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),
      },
-     (table) => [unique(NOTES_TITLE_UNIQUE).on(table.title)],
+     (table) => [uniqueIndex("notes_title_unique").on(table.title)],
    );
 
    export type NoteRow = typeof notes.$inferSelect;
    ```
 
-   IDs: the template has no ID package, so `defaultRandom()` (the database's `gen_random_uuid()`)
-   is the simplest choice. If the client must know an ID before the server answers (optimistic
-   writes), add a pure package with branded ID types and a `newId()` (UUIDv7) and use
-   `uuid("id").$type<NoteId>()` instead. Timestamps have no default: the repo sets them from the
+   IDs: SQLite has no UUID type or generator, so the repo sets `id: crypto.randomUUID()` on
+   insert (as `pairing.repo.ts` does). If the client must know an ID before the server answers
+   (optimistic writes), add a pure package with branded ID types and a `newId()` (UUIDv7) and use
+   `text("id").$type<NoteId>()` instead. Dates are `integer(..., { mode: "timestamp_ms" })`. Timestamps have no default: the repo sets them from the
    context's `now` (`docs/backend.md`, "Context").
 
 2. Export the table from `packages/db/src/schema/index.ts` and from `packages/db/src/index.ts`
@@ -140,12 +142,13 @@ reads (`packages/db/drizzle.config.ts`).
    scratch whenever the migrations change) and `vp -C apps/api test`.
 5. Add the repo functions in the module that owns the table (`<name>.repo.ts`, next recipe), with
    a test that asserts each mapped constraint.
-6. Run `pnpm test:postgres` once (Docker): PGlite and Postgres agree on almost everything, and this
-   is where they would not.
+6. Apply it to the local D1: `pnpm -C apps/api db:migrate:local` (`pnpm dev` also does this
+   before it starts), and run `pnpm e2e` once: tests run on `node:sqlite`, the app on D1, and
+   this is where they would disagree.
 
-The API applies pending migrations at startup (`main.ts` calls `migrate()`); there is no separate
-migrate command. `pnpm dev` keeps its data in `.data/pglite`; delete it after rewriting an
-unshipped migration.
+Wrangler applies migrations (`docs/backend.md`, "Database"): locally before `pnpm dev`, remotely
+before `pnpm -C apps/api ship`. `pnpm dev` keeps its data in `apps/api/.wrangler`; delete it
+after rewriting an unshipped migration.
 
 ### Recipe: an API module
 
@@ -178,7 +181,7 @@ unshipped migration.
    for invalid input (`BAD_REQUEST`). Copy `modules/system/system.test.ts`. Verify:
    `vp -C apps/api test src/modules/<name>`.
 8. New dependencies for procedures (a mailer, a client for another service) go on `Deps` in
-   `apps/api/src/context.ts`, are built in `main.ts`, get a default in
+   `apps/api/src/context.ts`, are built in `worker.ts`, get a default in
    `apps/api/src/testing/test-app.ts`, and tests pass their own through `createTestApp({...})`.
 
 ### Recipe: a web feature
