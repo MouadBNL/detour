@@ -1,27 +1,25 @@
 /**
- * `respond`, which turns a service's `Result` into the procedure's output or its declared error.
- * Procedure bases (middlewares a handler starts from, e.g. one that requires a session) go here
- * too, next to it.
- *
- *   os.system.health.handler(async ({ context, errors }) =>
- *     respond(await checkHealth(context), errors),
- *   );
- *   os.things.create.handler(async ({ context, input, errors }) =>
- *     respond(await createThing(context, input), errors, (error) =>
- *       errors.CONFLICT({ data: { reason: error.type } }),
- *     ),
- *   );
+ * `respond`, which turns a service's `Result` into the procedure's output or its declared error,
+ * plus procedure bases (middlewares requiring a signed-in session or a web session).
  */
-import type { SERVICE_UNAVAILABLE } from "@detour/contracts";
-import { UNAVAILABLE_REASONS } from "@detour/contracts";
-import type { Result, TaggedError } from "@detour/result";
-import { ORPCError, type ORPCErrorConstructorMap } from "@orpc/server";
+import type { NOT_FOUND } from "@detour/contracts";
+import {
+  FORBIDDEN,
+  SERVICE_UNAVAILABLE,
+  UNAUTHORIZED,
+  UNAVAILABLE_REASONS,
+} from "@detour/contracts";
+import { err, ok, type Result, type TaggedError } from "@detour/result";
+import { ORPCError, os as orpcOs, type ORPCErrorConstructorMap } from "@orpc/server";
 import * as z from "zod";
-import type { SharedError, Unavailable } from "../errors.ts";
+import type { RequestSession } from "../auth/types.ts";
+import type { Context } from "../context.ts";
+import type { NotFound, SharedError, Unavailable } from "../errors.ts";
 import { orThrow } from "./result.adapter.ts";
 
 type SharedErrorMap = ORPCErrorConstructorMap<{
   SERVICE_UNAVAILABLE: typeof SERVICE_UNAVAILABLE;
+  NOT_FOUND: typeof NOT_FOUND;
 }>;
 
 /** The constructor of `S` when `E` can hold `Error` (a procedure that never returns it needs none). */
@@ -30,7 +28,8 @@ type IfHolds<E, Error, S extends keyof SharedErrorMap> = [Extract<E, Error>] ext
   : Pick<SharedErrorMap, S>;
 
 /** The constructors `respond` needs for the shared errors `E` can hold. */
-type ErrorsFor<E> = IfHolds<E, Unavailable, "SERVICE_UNAVAILABLE">;
+type ErrorsFor<E> = IfHolds<E, Unavailable, "SERVICE_UNAVAILABLE"> &
+  IfHolds<E, NotFound, "NOT_FOUND">;
 
 /** The errors a router maps itself: those of `E` that are not shared. */
 type Own<E> = Exclude<E, SharedError>;
@@ -39,7 +38,9 @@ type OwnMapper<E> = [Own<E>] extends [never]
   : [own: (error: Own<E>) => ORPCError<string, unknown>];
 
 const SharedErrorSchema = z.discriminatedUnion("type", [
+  z.object({ type: z.literal("unexpected"), detail: z.string() }),
   z.object({ type: z.literal("unavailable"), reason: z.enum(UNAVAILABLE_REASONS) }),
+  z.object({ type: z.literal("not_found") }),
 ]);
 
 /**
@@ -49,17 +50,23 @@ const SharedErrorSchema = z.discriminatedUnion("type", [
 const defect = (error: TaggedError) => new ORPCError("INTERNAL_SERVER_ERROR", { cause: error });
 
 /** The declared error for a shared one; a branch per variant of `SharedErrorSchema`. */
-function sharedError(errors: Partial<SharedErrorMap>, error: z.infer<typeof SharedErrorSchema>) {
-  if (errors.SERVICE_UNAVAILABLE !== undefined)
-    return errors.SERVICE_UNAVAILABLE({ data: { reason: error.reason } });
-  return defect(error);
+function sharedError(
+  errors: Partial<SharedErrorMap>,
+  error: z.infer<typeof SharedErrorSchema>,
+): ORPCError<string, unknown> {
+  if (error.type === "unexpected") return defect(error);
+  if (error.type === "unavailable") {
+    return errors.SERVICE_UNAVAILABLE === undefined
+      ? defect(error)
+      : errors.SERVICE_UNAVAILABLE({ data: { reason: error.reason } });
+  }
+  return errors.NOT_FOUND === undefined ? defect(error) : errors.NOT_FOUND();
 }
 
 /**
  * The service's value, or its error as the procedure's declared error: `Unavailable` ->
- * `SERVICE_UNAVAILABLE { reason }` (`src/errors.ts`). Every other error of the service goes to
- * `own`, which the type checker requires exactly when there is such an error; it maps them to the
- * procedure's own errors (usually `CONFLICT { reason }`). An error left unmapped is a defect.
+ * `SERVICE_UNAVAILABLE { reason }`, `NotFound` -> `NOT_FOUND`, `Unexpected` -> undeclared 500.
+ * Every other error goes to `own`, which the type checker requires exactly when there is one.
  */
 export function respond<T, E extends TaggedError>(
   result: Result<T, E>,
@@ -77,3 +84,43 @@ export function respond<T>(
     return own === undefined ? defect(error) : own(error);
   });
 }
+
+const base = orpcOs.$context<Context>();
+
+type Unauthorized = { readonly type: "unauthorized" };
+
+/** The caller's session; an outage while checking it is `Unavailable`, never "signed out". */
+function requireSession(context: Context): Result<RequestSession, Unauthorized | Unavailable> {
+  if (context.sessionUnavailable !== null) {
+    return err({ type: "unavailable", reason: context.sessionUnavailable });
+  }
+  return context.session === null ? err({ type: "unauthorized" }) : ok(context.session);
+}
+
+/** Requires any valid session (web cookie or scoped extension bearer token). */
+export const authenticated = base
+  .errors({ UNAUTHORIZED, SERVICE_UNAVAILABLE })
+  .middleware(({ context, errors, next }) => {
+    const session = orThrow(requireSession(context), (error) =>
+      error.type === "unavailable"
+        ? errors.SERVICE_UNAVAILABLE({ data: { reason: error.reason } })
+        : errors.UNAUTHORIZED(),
+    );
+    return next({ context: { session, user: session.user } });
+  });
+
+/** Requires a first-party WorkOS web session (rejects scoped extension bearer tokens). */
+export const webAuthenticated = base
+  .errors({ UNAUTHORIZED, FORBIDDEN, SERVICE_UNAVAILABLE })
+  .middleware(({ context, errors, next }) => {
+    const session = orThrow(requireSession(context), (error) =>
+      error.type === "unavailable"
+        ? errors.SERVICE_UNAVAILABLE({ data: { reason: error.reason } })
+        : errors.UNAUTHORIZED(),
+    );
+    const webSession = orThrow(
+      session.kind === "web_session" ? ok(session) : err({ type: "web_session_required" }),
+      (error) => errors.FORBIDDEN({ data: { reason: error.type } }),
+    );
+    return next({ context: { session: webSession, user: webSession.user } });
+  });

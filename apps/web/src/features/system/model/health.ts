@@ -9,6 +9,7 @@ type Unavailable = Extract<HealthFailure, { readonly type: "service_unavailable"
 const UNAVAILABLE: Record<Unavailable["reason"], string> = {
   shutting_down: "The API is restarting. Try again in a moment.",
   database_unavailable: "The API cannot reach its database.",
+  auth_unavailable: "The API cannot reach its sign-in provider.",
 };
 const FAILURES: Record<Exclude<HealthFailure, Unavailable>["type"], string> = {
   unreachable: "The API does not answer.",
