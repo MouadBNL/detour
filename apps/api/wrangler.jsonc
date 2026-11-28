@@ -1,0 +1,31 @@
+// Cloudflare Worker for apps/api. Wrangler owns local dev (workerd + local D1), migrations and
+// deploys; see the scripts in package.json and docs/backend.md.
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "detour-api",
+  "main": "src/worker.ts",
+  "compatibility_date": "2026-11-20",
+  "compatibility_flags": ["nodejs_compat"],
+  "observability": { "enabled": true },
+  // apps/web proxies /rpc and /api/auth here (API_PORT in .env, default 3001).
+  "dev": { "port": 3001 },
+  // Declared so `wrangler types` puts them on `Bindings`, `wrangler dev` warns when .dev.vars lacks
+  // one (src/env.ts has dev defaults), and `wrangler deploy` refuses to ship without them.
+  "secrets": {
+    "required": [
+      "WORKOS_API_KEY",
+      "WORKOS_CLIENT_ID",
+      "WORKOS_COOKIE_PASSWORD",
+      "WORKOS_REDIRECT_URI",
+    ],
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "detour",
+      // drizzle-kit writes one folder per migration (packages/db/migrations/<name>/migration.sql).
+      "migrations_dir": "../../packages/db/migrations",
+      "migrations_pattern": "../../packages/db/migrations/*/migration.sql",
+    },
+  ],
+}

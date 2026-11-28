@@ -1,0 +1,9 @@
+# Copy to .dev.vars (git-ignored). `wrangler dev` loads it as the Worker's secrets; src/env.ts
+# parses them. The API boots without this file (placeholder WorkOS ids; a random cookie password
+# per `wrangler dev` run, so sessions end when it restarts); sign-in needs real credentials from
+# https://dashboard.workos.com.
+# In production, set each one with `wrangler secret put <NAME>` (run in apps/api).
+# WORKOS_API_KEY=sk_test_...
+# WORKOS_CLIENT_ID=client_...
+# WORKOS_COOKIE_PASSWORD=replace-with-a-32-plus-char-random-secret
+# WORKOS_REDIRECT_URI=http://localhost:5173/api/auth/callback

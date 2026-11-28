@@ -6,8 +6,7 @@
   "type": "module",
   "scripts": {
     "check:static": "vp check",
-    "e2e": "playwright test",
-    "test:postgres": "node src/postgres.adapter.ts"
+    "e2e": "playwright test"
   },
   "devDependencies": {
     "@playwright/test": "catalog:",

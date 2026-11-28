@@ -7,10 +7,6 @@ import * as z from "zod";
 const EnvSchema = z.object({
   E2E_API_PORT: z.coerce.number().int().min(1).max(65_535).default(3461),
   E2E_WEB_PORT: z.coerce.number().int().min(1).max(65_535).default(5461),
-  /** Run the API on this Postgres instead of a throwaway PGlite (`pnpm test:postgres`). */
-  E2E_DATABASE_URL: z.url({ protocol: /^postgres(ql)?$/ }).optional(),
-  /** Image of the throwaway server `pnpm test:postgres` starts. */
-  E2E_POSTGRES_IMAGE: z.string().min(1).default("postgres:18"),
   CI: z.stringbool().default(false),
 });
 
@@ -27,5 +23,15 @@ export function childEnv(overrides: Record<string, string>): Record<string, stri
   return { ...Object.fromEntries(inherited), ...overrides };
 }
 
-/** Settings of apps/api and apps/web (`.env.example`); a developer's values must not leak in. */
-const APP_SETTINGS = new Set(["API_PORT", "WEB_PORT", "DATABASE_URL", "PGLITE_DATA_DIR"]);
+/**
+ * Settings of apps/web (`.env.example`) and apps/api (`.dev.vars.example`; `wrangler dev` also reads
+ * declared secrets from its own environment); a developer's values must not leak in.
+ */
+const APP_SETTINGS = new Set([
+  "API_PORT",
+  "WEB_PORT",
+  "WORKOS_API_KEY",
+  "WORKOS_CLIENT_ID",
+  "WORKOS_COOKIE_PASSWORD",
+  "WORKOS_REDIRECT_URI",
+]);

@@ -5,13 +5,17 @@ node_modules
 dist
 *.tsbuildinfo
 
-# Local database (PGlite data directory used by `pnpm dev`)
-.data
+# Wrangler local state (D1 database of `pnpm dev`, under apps/api/.wrangler)
+.wrangler
 
 # Environment: copy .env.example to .env
 .env
 .env.*
 !.env.example
+# Wrangler's local secrets for apps/api: copy apps/api/.dev.vars.example to apps/api/.dev.vars
+.dev.vars
+.dev.vars.*
+!.dev.vars.example
 
 # Logs
 *.log
@@ -28,6 +32,9 @@ dist
 
 # TanStack Router generator scratch files
 .tanstack
+
+# Wrangler generated types (`pnpm -C apps/api types`; check:static and dev regenerate them)
+apps/api/worker-configuration.d.ts
 
 # WXT generated types and extension build output
 .wxt

@@ -4,5 +4,5 @@ import { sql } from "drizzle-orm";
 
 /** One round trip to the database: `ok` when it answers, its failure as a value when it does not. */
 export async function pingDatabase(db: Db): Promise<Result<unknown, QueryFailure>> {
-  return tryQuery(() => db.execute(sql`select 1`));
+  return tryQuery(() => db.run(sql`select 1`));
 }

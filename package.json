@@ -9,7 +9,6 @@
     "check": "vp run -r check:static && vp run -r test && vp run knip && vp run duplicates",
     "check:static": "vp check vite.config.ts knip.config.ts .jscpd.json tsconfig.json tsconfig.base.json package.json pnpm-workspace.yaml README.md AGENTS.md CLAUDE.md docs",
     "e2e": "pnpm --filter @detour/e2e e2e",
-    "test:postgres": "pnpm --filter @detour/e2e test:postgres",
     "fix": "vp check --fix",
     "prepare": "vp config --no-agent"
   },
