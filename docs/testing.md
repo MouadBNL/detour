@@ -33,8 +33,9 @@ condition (narrow with `assert(row !== undefined)` instead), no snapshots, no te
 | Journey (browser)          | `e2e/tests/health.spec.ts`                                       | Playwright on a production build and the real API. See "End-to-end".                                                                     |
 
 Tests that touch the database get it from `createTestDb()` (directly or through `createTestApp()`).
-Each worker boots one in-memory PGlite, from a migrated snapshot cached in the OS temp dir (rebuilt
-when migrations change), and every call empties it. So: call it in each test, never use
+Each worker boots one in-memory `node:sqlite` database with D1's codecs, migrated from
+`packages/db/migrations/` (well under a millisecond), and every call empties it. The app itself
+runs on D1 in workerd; the e2e suite is where the two would disagree. So: call it in each test, never use
 `.concurrent`, and keep `test.isolate: false` in the package's `vite.config.ts` (as `apps/api` and
 `packages/db` do) so the database survives across test files.
 
@@ -96,29 +97,15 @@ catalog; see the Canary column of `docs/conventions.md`).
    nothing. A boundary or a new place an existing rule must apply is a new sample in the same way.
 5. **The row** in `docs/conventions.md`, with "yes" in its Canary column. Verify: `pnpm check`.
 
-## Real Postgres
-
-PGlite is one connection in one process, so requests never overlap in the database: a race between
-a check and a write cannot show. `pnpm test:postgres` (Docker needed, about a minute) starts a
-throwaway Postgres container under a random name and port (`e2e/src/postgres.adapter.ts`), runs
-the `packages/db` and `apps/api` suites on it (`TEST_DATABASE_URL`: each worker creates its own
-database there, and requests within a test use a connection pool, so they run truly in
-parallel), runs the e2e suite with the API on Postgres, and removes the container.
-
-Run it after touching transactions, locks, invariants or the schema. A test of a concurrency
-invariant passes on PGlite trivially; it means something only there, and only if it was seen
-failing with its lock removed. To run one suite on your own throwaway server:
-`TEST_DATABASE_URL=postgres://... vp -C apps/api test` (the role must be a superuser; the
-databases each worker creates are left behind).
-
 ## End-to-end
 
 `e2e/` is a Playwright suite, run by `pnpm e2e`, deliberately **not** part of `pnpm check` (CI
 runs it as its own job). `e2e/src/stack.adapter.ts` (the `globalSetup`) prepares a throwaway
-PGlite directory in the OS temp dir, builds the web app for production, starts the API
-(`E2E_API_PORT`, default 3461) and `vite preview` (`E2E_WEB_PORT`, 5461), and on exit or Ctrl-C
-stops exactly what it started and deletes the directory. It reads no `.env` (`e2e/src/env.ts`),
-so it runs next to `pnpm dev`. Failed journeys keep a trace and a screenshot in
+Wrangler state directory in the OS temp dir and migrates its local D1, builds the web app for
+production, starts the API with `wrangler dev` (`E2E_API_PORT`, default 3461) and `vite preview`
+(`E2E_WEB_PORT`, 5461), and on exit or Ctrl-C stops exactly what it started and deletes the
+directory. It reads neither `.env` nor `apps/api/.dev.vars` (`e2e/src/env.ts`, an empty
+`--env-file`), so it runs next to `pnpm dev`. Failed journeys keep a trace and a screenshot in
 `e2e/test-results/` (`pnpm -C e2e exec playwright show-trace <trace.zip>`).
 
 The template has one journey, `e2e/tests/health.spec.ts`: the app loads, shows a healthy API, and
@@ -220,7 +207,6 @@ misses, the task's inputs are wrong: fix them, never `--no-cache` in scripts.
 ```sh
 pnpm check                                        # everything, cached per package
 pnpm e2e                                          # browser journeys (not in check)
-pnpm test:postgres                                # API, db and e2e on real Postgres (Docker)
 vp run -r test                                    # all tests, cached per package
 vp -C apps/api test                               # one package
 vp -C packages/result test src/result.test.ts     # one file

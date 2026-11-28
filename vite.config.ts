@@ -74,6 +74,7 @@ const DEFAULT_EXPORT_ALLOWED = [
   "**/wxt.config.ts",
   "**/drizzle.config.ts",
   "knip.config.ts",
+  "apps/api/src/worker.ts",
   "apps/web/src/routes/**",
   "apps/extension/src/entrypoints/*.ts",
   "tools/oxlint-plugin/src/index.ts",
@@ -105,6 +106,7 @@ export default defineConfig({
       "**/routeTree.gen.ts",
       "**/.wxt/**",
       "**/.output/**",
+      "**/worker-configuration.d.ts",
       "pnpm-lock.yaml",
       "packages/db/migrations/**",
     ],
@@ -114,6 +116,7 @@ export default defineConfig({
     ignorePatterns: [
       "**/dist/**",
       "**/.wxt/**",
+      "**/worker-configuration.d.ts",
       "**/.output/**",
       "**/routeTree.gen.ts",
       "e2e/test-results/**",

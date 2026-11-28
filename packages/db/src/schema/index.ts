@@ -1,12 +1,15 @@
 /**
- * Every table. drizzle-kit reads this file (`drizzle.config.ts`) to generate migrations.
- *
- * The template has no tables yet. The first one goes in a file of its own next to this one
- * (`src/schema/<name>.ts`), exported from here and re-exported by `src/index.ts`
- * (`export * from "./schema/index.ts"`) so repos import it from `@detour/db`; then
- * `pnpm -C packages/db generate` writes its migration to `migrations/`, which
- * `createDb().migrate()` applies at startup.
+ * Every SQLite / Cloudflare D1 table. drizzle-kit reads this file (`drizzle.config.ts`)
+ * to generate migrations into `packages/db/migrations/`.
  */
-
-/** The Postgres schema the tables live in: what drizzle-kit diffs and the test reset empties. */
-export const DB_SCHEMA = "public";
+export {
+  EXTENSION_TOKEN_HASH_UNIQUE,
+  EXTENSION_TOKEN_PAIRING_UNIQUE,
+  extensionTokens,
+  PAIRING_DEVICE_CODE_HASH_UNIQUE,
+  PAIRING_USER_CODE_UNIQUE,
+  pairingSessions,
+  type ExtensionTokenRow,
+  type PairingSessionRow,
+} from "./pairing.ts";
+export { users, type UserRow } from "./users.ts";

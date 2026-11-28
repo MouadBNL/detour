@@ -30,6 +30,7 @@ const config: KnipConfig = {
     "packages/ui/src/*.tsx": ["types"],
   },
   workspaces: {
+    // Entry: `main` in wrangler.jsonc (src/worker.ts), found by Knip's Wrangler plugin.
     "apps/api": { project: ["src/**/*.ts!", ...TEST_ONLY] },
     "apps/extension": {
       entry: ["src/entrypoints/*.ts!", "src/entrypoints/*/main.{ts,tsx}!"],

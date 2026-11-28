@@ -23,9 +23,12 @@ export default defineConfig(({ mode }) => {
   // this file (test, check, knip).
   const env = loadEnv(mode, ENV_DIR, ["API_PORT", "WEB_PORT"]);
   const apiTarget = `http://localhost:${env["API_PORT"] ?? "3001"}`;
-  // The API serves oRPC on /rpc (apps/api/src/app.ts). Proxied, the browser sees one origin: no
-  // CORS, and a cookie the API sets is first-party.
-  const proxy = { "/rpc": { target: apiTarget } };
+  // The API serves oRPC on /rpc and WorkOS AuthKit routes on /api/auth (apps/api/src/app.ts).
+  // Proxied, the browser sees one origin: no CORS, and auth cookies stay first-party.
+  const proxy = {
+    "/rpc": { target: apiTarget },
+    "/api/auth": { target: apiTarget },
+  };
   const port = Number(env["WEB_PORT"] ?? "5173");
 
   return {

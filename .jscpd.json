@@ -10,6 +10,7 @@
     "**/migrations/**",
     "**/node_modules/**",
     "**/.wxt/**",
+    "**/worker-configuration.d.ts",
     "**/.output/**"
   ],
   "reporters": ["console"]

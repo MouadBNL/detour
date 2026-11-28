@@ -8,23 +8,28 @@ The step-by-step recipes (an API module, a table) are in `docs/architecture.md`.
 ## Request path
 
 ```
-browser ─ /rpc/* ─> Hono (app.ts) ─> oRPC handler ─> router ─> service ─> repo ─> @detour/db (Drizzle)
+browser ─ /rpc/* ─> Worker (worker.ts) ─> Hono (app.ts) ─> oRPC handler ─> router ─> service ─> repo ─> @detour/db (Drizzle on D1)
 ```
 
-| File                                  | Role                                                                          |
-| ------------------------------------- | ----------------------------------------------------------------------------- |
-| `apps/api/src/main.ts`                | Process entry: loads env, opens and migrates the db, serves, drains on signal |
-| `apps/api/src/env.ts`                 | The only reader of `process.env`: a Zod schema, `loadEnv()` as `Result`       |
-| `apps/api/src/app.ts`                 | `createApp(deps)`: oRPC on `/rpc` (`RPC_PREFIX`); the one place defects log   |
-| `apps/api/src/context.ts`             | `Deps` (long-lived: `db`, `now`, `lifecycle`) and the per-request `Context`   |
-| `apps/api/src/router.ts`              | The root router, one key per module, checked against the contract             |
-| `apps/api/src/orpc/implementer.ts`    | `os`: the contract implemented with our `Context`                             |
-| `apps/api/src/orpc/procedures.ts`     | `respond`: a service's `Result` to the output or a declared error             |
-| `apps/api/src/orpc/result.adapter.ts` | `orThrow`: the one place that throws oRPC's declared errors                   |
-| `apps/api/src/errors.ts`              | The errors every service shares: `Unavailable`, `unavailable(reason)`         |
-| `packages/db/src/client.adapter.ts`   | `createDb()`: Postgres or PGlite, `migrate()`, `close()`                      |
-| `packages/db/src/query.adapter.ts`    | `tryQuery`: constraint violations and an unreachable database as `Result`     |
-| `apps/api/src/testing/test-app.ts`    | `createTestApp()`: the whole API on a fresh database, for tests               |
+The API is a Cloudflare Worker and Wrangler is its only runtime: `wrangler dev` (workerd and a
+local D1) in development, `wrangler deploy` in production, configured in `apps/api/wrangler.jsonc`.
+There is no Node server.
+
+| File                                  | Role                                                                           |
+| ------------------------------------- | ------------------------------------------------------------------------------ |
+| `apps/api/wrangler.jsonc`             | The Worker: `main`, compatibility date/flags, the `DB` D1 binding, dev port    |
+| `apps/api/src/worker.ts`              | Worker entry: parses the bindings, builds `Deps` (D1, WorkOS), runs the app    |
+| `apps/api/src/env.ts`                 | The only reader of configuration: a Zod schema, `loadEnv(bindings)` → `Result` |
+| `apps/api/src/app.ts`                 | `createApp(deps)`: oRPC on `/rpc` (`RPC_PREFIX`); the one place defects log    |
+| `apps/api/src/context.ts`             | `Deps` (long-lived: `db`, `now`, `lifecycle`) and the per-request `Context`    |
+| `apps/api/src/router.ts`              | The root router, one key per module, checked against the contract              |
+| `apps/api/src/orpc/implementer.ts`    | `os`: the contract implemented with our `Context`                              |
+| `apps/api/src/orpc/procedures.ts`     | `respond`: a service's `Result` to the output or a declared error              |
+| `apps/api/src/orpc/result.adapter.ts` | `orThrow`: the one place that throws oRPC's declared errors                    |
+| `apps/api/src/errors.ts`              | The errors every service shares: `Unavailable`, `unavailable(reason)`          |
+| `packages/db/src/d1.ts`               | `createD1Db(env.DB)`: Drizzle over the D1 binding; `Db`, the type repos take   |
+| `packages/db/src/query.adapter.ts`    | `tryQuery`: constraint violations and an unreachable database as `Result`      |
+| `apps/api/src/testing/test-app.ts`    | `createTestApp()`: the whole API on a fresh database, for tests                |
 
 ## An API module
 
@@ -80,8 +85,8 @@ has the whole path and the recipes for a contract error and a shared error.
 
 ### Context
 
-`Deps` (`apps/api/src/context.ts`) are the long-lived dependencies: `main.ts` builds the real
-ones, tests build their own through `createTestApp({...})`. `Context` is what each handler
+`Deps` (`apps/api/src/context.ts`) are the long-lived dependencies: `worker.ts` builds the real
+ones (per request: a Worker has bindings, not a process environment), tests build their own through `createTestApp({...})`. `Context` is what each handler
 receives (today `Context = Deps`; a per-request part such as a session is added as
 `Deps & { ... }`). Services take the context, or a `Pick` of the fields they use
 (`Pick<Context, "db" | "now">`), so tests can call them with less.
@@ -89,38 +94,53 @@ receives (today `Context = Deps`; a per-request part such as a session is added 
 - **Time comes from the context** (`now()`), never from `new Date()` in a service or repo, so a
   test pins it (`createTestApp({ now: () => fixed })`). Writes take `now` and set `createdAt` /
   `updatedAt` from it; do not rely on database defaults or `$onUpdate` for timestamps.
-- **Lifecycle** tells the health check the process is draining: `main.ts` flips it on SIGTERM or
-  SIGINT, health answers `SERVICE_UNAVAILABLE { reason: "shutting_down" }` so a load balancer
-  stops sending traffic, then the server closes.
+- **Lifecycle** tells the health check the server is draining, and health then answers
+  `SERVICE_UNAVAILABLE { reason: "shutting_down" }`. A Worker isolate never drains mid-request,
+  so `worker.ts` passes `() => false`; tests still cover the branch.
 - A new dependency (a mailer, a client for another service, a queue) is a field of `Deps` with a
-  small interface of our own, built in `main.ts`; `createTestApp` gives it a default, and tests
+  small interface of our own, built in `worker.ts`; `createTestApp` gives it a default, and tests
   pass a fake that implements it.
 
 ### Environment
 
-`apps/api/src/env.ts` is the only file in the API that reads `process.env`
-(`repo/no-process-env`). It parses it with a Zod schema into `Env` and returns
-`Result<Env, InvalidEnv>`; `main.ts` refuses to start on an error and prints which variables are
-wrong. Add a variable there, with a default when development can do without it, document it in
-`.env.example`, and pass the parsed value to what needs it. The settings today: `API_PORT`
-(3001), `DATABASE_URL` (unset: PGlite), `PGLITE_DATA_DIR` (`<repo>/.data/pglite`). The e2e suite
-has its own `e2e/src/env.ts`.
+Configuration arrives as Worker bindings: the secrets listed in `secrets.required` of
+`wrangler.jsonc` (`wrangler secret put <NAME>` in `apps/api`; `wrangler deploy` refuses to ship
+without them), and locally `apps/api/.dev.vars` (git-ignored; copy `.dev.vars.example`) or the
+shell environment. `wrangler types` generates their TypeScript type, the global `Bindings`
+interface, together with the workerd runtime types for the compatibility date and flags, into
+`apps/api/worker-configuration.d.ts` (git-ignored; `check:static` and `pnpm dev` regenerate it,
+`pnpm -C apps/api types` by hand after editing `wrangler.jsonc`). `apps/api/src/env.ts` is the only file that interprets them
+(`repo/no-process-env`): `worker.ts` passes the bindings to `loadEnv`, which parses them with a Zod
+schema into `Result<Env, InvalidEnv>`; on an error the Worker logs which variables are wrong and
+answers 500. Add a variable there, with a default when development can do without it, document it
+in `secrets.required` and `.dev.vars.example` (or `vars` in `wrangler.jsonc` when it is not a
+secret), and pass the parsed value to what needs it. The settings today: `WORKOS_API_KEY`, `WORKOS_CLIENT_ID`,
+`WORKOS_COOKIE_PASSWORD`, `WORKOS_REDIRECT_URI`, all with dev defaults. The dev port is `dev.port`
+in `wrangler.jsonc` (3001; the web proxy reads `API_PORT` from the root `.env`, keep them equal).
+The e2e suite has its own `e2e/src/env.ts`.
 
 ## Database
 
-`createDb({ databaseUrl?, dataDir? })` (`packages/db/src/client.adapter.ts`) returns
-`Result<Database, DbUnavailable>` where `Database = { db, driver, migrate(), close() }`:
+Production and `pnpm dev` run on Cloudflare D1 (SQLite). `createD1Db(env.DB)` (`@detour/db`)
+wraps the binding in Drizzle; `Db` is the type repos take. Everything the package root exports
+is free of Node built-ins, so it bundles for workerd; the `node:sqlite` driver that tests use
+lives under `packages/db/src/testing/` and is reachable only from `@detour/db/testing`.
 
-- `databaseUrl` set: Postgres through `pg` (a pool). The API reads it from `DATABASE_URL`.
-- otherwise PGlite (Postgres in WASM, in process), on disk in `dataDir`. `pnpm dev` uses
-  `<repo>/.data/pglite` (git-ignored; delete it to start over). No Docker, no port. Only one
-  process can open a PGlite directory at a time.
+Migrations live in `packages/db/migrations/<timestamp>_<name>/migration.sql`, generated by
+`pnpm -C packages/db generate` from `packages/db/src/schema/` (recipe: `docs/architecture.md`,
+"Recipe: a table and its first migration"). Wrangler applies them (`migrations_pattern` in
+`wrangler.jsonc` points it at drizzle-kit's folder layout) and records them in `d1_migrations`:
 
-`Db` is the Drizzle database type repos take. The API runs `migrate()` at startup; there is no
-separate migrate command. Migrations live in `packages/db/migrations/` (empty in the template but
-for `.gitkeep`), generated by `pnpm -C packages/db generate` from `packages/db/src/schema/`
-(recipe: `docs/architecture.md`, "Recipe: a table and its first migration"). Read each generated
-migration and commit it; never edit one that has run anywhere else.
+```sh
+pnpm -C apps/api db:migrate:local     # the local D1 of `pnpm dev` (apps/api/.wrangler, git-ignored)
+pnpm -C apps/api db:migrate:remote    # the production D1 (needs `wrangler login`)
+```
+
+`pnpm dev` applies pending local migrations before `wrangler dev` starts, and `pnpm -C apps/api
+ship` applies remote ones before it deploys (the script is not called `deploy`: `pnpm deploy` is a
+pnpm built-in and would shadow it). Tests apply the same files to `node:sqlite`. Read
+each generated migration and commit it; never edit one that has run anywhere else. Delete
+`apps/api/.wrangler` to start the local database over.
 
 ### Repos
 
@@ -189,32 +209,23 @@ export async function insertNote(
 - **Missing is `undefined`.** A row looked up by its key and not there, and an update or delete
   that matched no row, return `undefined` (or `ok(undefined)`); the service decides what that
   means (usually a `not_found` error).
-- **Never show `detail` to users**: it is Postgres' own text and can contain other users' data.
+- **Never show `detail` to users**: it is the database's own text and can contain other users'
+  data.
 - **Rows are schema-inferred**: export `typeof notes.$inferSelect` from the schema file.
 
-### Transactions and locking (not in the template)
+### Atomic writes (not in the template)
 
-The template has no writes, so it ships no transaction helper. When the first write that needs
-one arrives, add it to `packages/db` as an adapter, because Drizzle signals a rollback by
-throwing:
+D1 has no interactive transactions: Drizzle's `db.transaction(...)` fails on it. Several writes
+that must succeed or fail together go in one `db.batch([...])`, which D1 runs as a single
+implicit transaction; a check whose answer decides a write cannot sit between them. So:
 
-- **`inTransaction(db, async (tx) => Result)`**: the callback returns a `Result`; an `Err` rolls
-  back (Drizzle's own `db.transaction` would commit it), a throw too. Implement it in
-  `packages/db/src/transaction.adapter.ts` by throwing a private symbol inside `db.transaction`
-  and returning the `Err` outside; export it from `packages/db/src/index.ts`. Use `tx`, not `db`,
-  for every query inside.
-- A failed statement aborts a Postgres transaction, so after a `tryQuery` failure inside one,
-  return the `Err` at once.
-- **A check followed by a write races** another request doing the same unless both take the same
-  lock in the same transaction. Check and write in one transaction, under a row lock
-  (`select ... for update`, or `for no key update` when inserts that only reference the row
-  should not wait). A conditional write (`update ... where status = 'pending'`) needs no lock:
-  the row count is the answer.
-- **One lock order** for the whole API (for example: the parent row, then children by ID), so two
-  requests never deadlock. Write it down here when you choose it.
-- PGlite has one connection, so races cannot show there. Every invariant that depends on a lock
-  gets a test that runs only on real Postgres and is checked to fail with the lock removed
-  (`pnpm test:postgres`, `docs/testing.md`).
+- **Make the write conditional** instead of checking first: `update ... where status =
+  'pending'` and read the row count (`returning()`), or an insert a unique constraint rejects
+  (`tryQuery` returns the `ConstraintViolation`). The row count or the violation is the answer.
+- **Batch what belongs together** (`db.batch([insertA, updateB])`) behind a `tryQuery`, and keep
+  read-then-decide logic in the service, before the batch.
+- A test of such an invariant runs on `node:sqlite` in one process, so a race cannot show there:
+  prove the conditional write by asserting the second attempt is rejected, not by timing.
 
 ## Tests
 
@@ -294,8 +305,8 @@ When different users may do different things:
    memory; a property test generates data, filters it in the database and compares with
    `can(access, "<entity>.view", row)`.
 6. **Check and write in one transaction.** When the permission depends on a row another request
-   can change (a role, a membership), lock it, read it again under the lock, check, write (see
-   "Transactions and locking").
+   can change (a role, a membership), make the write conditional on what was checked
+   (`update ... where role = 'admin'`) so the row count is the answer (see "Atomic writes").
 7. **Errors.** `FORBIDDEN { reason }` is a shared contract error (`docs/errors.md`, "Recipe: a
    shared error"); `respond` maps a `{ type: "forbidden", reason }` service error to it.
 
@@ -319,5 +330,5 @@ When clients must see other users' changes without reloading:
 5. **Out of order is normal.** Two writes that waited for each other's locks can publish in either
    order: carry a version per row and drop older ones.
 6. **One process first.** An in-process hub is enough for one API process; with several, `publish`
-   also sends the change to the others (Postgres `NOTIFY` per scope, or an outbox table) and each
+   also sends the change to the others (a Durable Object per scope, or an outbox table) and each
    process filters for its own subscribers. Services do not change.

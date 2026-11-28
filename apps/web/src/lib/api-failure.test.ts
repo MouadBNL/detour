@@ -9,7 +9,7 @@ describe("ApiFailure", () => {
   it("is typed from the contract: each declared code with its data, and what any call meets", () => {
     expectTypeOf<ApiFailure<"system.health">>().toEqualTypeOf<
       | ({ readonly type: "service_unavailable" } & {
-          readonly reason: "shutting_down" | "database_unavailable";
+          readonly reason: "shutting_down" | "database_unavailable" | "auth_unavailable";
         })
       | { readonly type: "invalid_input" }
       | { readonly type: "unreachable" }

@@ -63,17 +63,16 @@ Libraries that already return values (Zod's `safeParse`, oRPC's `safe`) need no 
 
 The adapters in the template, each wrapping one library that throws:
 
-| File                                     | Wraps                                                                                 |
-| ---------------------------------------- | ------------------------------------------------------------------------------------- |
-| `packages/result/src/capture.adapter.ts` | any throwing call: `fromThrowable`, `fromPromise`                                     |
-| `packages/db/src/client.adapter.ts`      | the database drivers: `createDb()` and `migrate()` return `Result`                    |
-| `packages/db/src/query.adapter.ts`       | Drizzle queries: `tryQuery` returns constraint violations and an unreachable database |
-| `packages/db/src/snapshot.adapter.ts`    | the test database's on-disk snapshot (file system)                                    |
-| `apps/api/src/orpc/result.adapter.ts`    | oRPC's thrown errors: `orThrow`, used by `respond`                                    |
-| `apps/web/src/lib/query.adapter.ts`      | TanStack Query's thrown `queryFn` failures: `unwrapForQuery`                          |
-| `apps/web/src/lib/storage.adapter.ts`    | `localStorage`, which throws when storage is disabled                                 |
-| `e2e/src/*.adapter.ts`                   | child processes and the throwaway Postgres container of the e2e suite                 |
-| `tools/*/src/*.adapter.ts`               | the file system and child processes of the canary and the rename tool                 |
+| File                                        | Wraps                                                                                 |
+| ------------------------------------------- | ------------------------------------------------------------------------------------- |
+| `packages/result/src/capture.adapter.ts`    | any throwing call: `fromThrowable`, `fromPromise`                                     |
+| `packages/db/src/query.adapter.ts`          | Drizzle queries: `tryQuery` returns constraint violations and an unreachable database |
+| `packages/db/src/testing/sqlite.adapter.ts` | the tests' `node:sqlite` driver and migrator                                          |
+| `apps/api/src/orpc/result.adapter.ts`       | oRPC's thrown errors: `orThrow`, used by `respond`                                    |
+| `apps/web/src/lib/query.adapter.ts`         | TanStack Query's thrown `queryFn` failures: `unwrapForQuery`                          |
+| `apps/web/src/lib/storage.adapter.ts`       | `localStorage`, which throws when storage is disabled                                 |
+| `e2e/src/*.adapter.ts`                      | the Wrangler child processes of the e2e suite                                         |
+| `tools/*/src/*.adapter.ts`                  | the file system and child processes of the canary and the rename tool                 |
 
 ## Expected failures and defects
 

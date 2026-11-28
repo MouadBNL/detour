@@ -9,11 +9,11 @@ See [BRIEF.md](./BRIEF.md) for the full product and technical brief.
 ## Workspace
 
 - `apps/extension` — Chrome + Firefox MV3 extension (WXT, React 19, Tailwind v4)
-- `apps/api` — Hono + oRPC + Drizzle backend (PGlite locally, Postgres in production)
+- `apps/api` — Hono + oRPC + Drizzle backend on Cloudflare Workers + D1 (Wrangler: `dev`, migrations, `deploy`)
 - `apps/web` — React 19 + TanStack Router web app
 - `packages/ui` — shared Tailwind v4 design tokens and Base UI primitives
 - `packages/contracts` — shared Zod + oRPC API contracts
-- `packages/db` — Drizzle schema, migrations, and PGlite/Postgres client
+- `packages/db` — Drizzle schema, migrations, and the D1 client (`node:sqlite` for tests)
 - `packages/result` — `Result` type utilities
 
 ## Quick start

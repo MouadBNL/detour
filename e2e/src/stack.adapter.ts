@@ -1,22 +1,23 @@
 /**
  * Playwright `globalSetup`: brings up the whole app for the suite and returns its teardown.
  *
- *   1. a throwaway PGlite directory in the OS temp dir (or `E2E_DATABASE_URL`, a real Postgres),
+ *   1. a throwaway Wrangler state directory (local D1) in the OS temp dir, migrated with
+ *      `wrangler d1 migrations apply --local`,
  *   2. a production build of the web app into that temp dir (Vite's `build()`, in this process),
- *   3. the API (`node apps/api/src/main.ts`, a child process) on `E2E_API_PORT`, which migrates
- *      the database as it starts,
+ *   3. the API Worker (`wrangler dev`, a child process) on `E2E_API_PORT`,
  *   4. `vite preview` of the build (in this process) on `E2E_WEB_PORT`, proxying `/rpc` to the
  *      API like the dev server does.
  *
- * Nothing is shared with `pnpm dev`: other ports, another database, `.env` is not read and the
- * apps' own settings are dropped from the inherited environment. Teardown stops only what this
- * file started: the preview server it holds, and the API child by its PID (SIGTERM, then SIGKILL
- * after a grace period); then it deletes the temp dir.
+ * Nothing is shared with `pnpm dev`: other ports, another D1 state directory, neither `.env` nor
+ * `apps/api/.dev.vars` is read (Wrangler gets an empty `--env-file`) and the apps' own settings are
+ * dropped from the inherited environment. Teardown stops only what this file started: the preview
+ * server it holds, and the Wrangler child by its PID (SIGTERM, then SIGKILL after a grace period);
+ * then it deletes the temp dir.
  *
  * An adapter: process and server management throws, and a failed start must tear down what is up.
  */
 import { spawn, type ChildProcess } from "node:child_process";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -27,8 +28,9 @@ import { API_URL, childEnv, env } from "./env.ts";
 const REPO = fileURLToPath(new URL("../..", import.meta.url));
 const API_DIR = path.join(REPO, "apps/api");
 const WEB_DIR = path.join(REPO, "apps/web");
+const WRANGLER = path.join(API_DIR, "node_modules/wrangler/bin/wrangler.js");
 
-/** Startup can be slow on a loaded machine (a cold build, PGlite's first boot). */
+/** Startup can be slow on a loaded machine (a cold build, workerd's first boot). */
 const START_TIMEOUT_MS = 90_000;
 const STOP_GRACE_MS = 5_000;
 
@@ -43,20 +45,24 @@ export default async function globalSetup(): Promise<() => Promise<void>> {
   };
 
   try {
-    const database: Record<string, string> =
-      env.E2E_DATABASE_URL === undefined
-        ? { PGLITE_DATA_DIR: path.join(runDir, "pglite") }
-        : { DATABASE_URL: env.E2E_DATABASE_URL };
-    const apiEnv = childEnv({ ...database, API_PORT: String(env.E2E_API_PORT) });
+    const apiEnv = childEnv({ WRANGLER_SEND_METRICS: "false" });
+    const persistTo = path.join(runDir, "wrangler");
+    const envFile = path.join(runDir, "api.env");
+    await writeFile(envFile, "");
     const outDir = path.join(runDir, "web");
 
     await build({ root: WEB_DIR, logLevel: "error", build: { outDir, emptyOutDir: true } });
 
-    const api = spawnNode(["src/main.ts"], apiEnv);
-    cleanups.push(() => stop(api));
-    await listening(api, /api listening on/);
+    const migrate = ["d1", "migrations", "apply", "DB", "--local", "--persist-to", persistTo];
+    await completes(spawnWrangler(migrate, apiEnv));
 
-    const proxy = { "/rpc": { target: API_URL } };
+    const port = String(env.E2E_API_PORT);
+    const dev = ["dev", "--port", port, "--persist-to", persistTo, "--env-file", envFile];
+    const api = spawnWrangler([...dev, "--show-interactive-dev-session=false"], apiEnv);
+    cleanups.push(() => stop(api));
+    await listening(api, /Ready on http/);
+
+    const proxy = { "/rpc": { target: API_URL }, "/api/auth": { target: API_URL } };
     const web = await preview({
       root: WEB_DIR,
       logLevel: "warn",
@@ -71,8 +77,8 @@ export default async function globalSetup(): Promise<() => Promise<void>> {
   return teardown;
 }
 
-function spawnNode(args: string[], childEnvironment: Record<string, string>): ChildProcess {
-  return spawn(process.execPath, args, {
+function spawnWrangler(args: string[], childEnvironment: Record<string, string>): ChildProcess {
+  return spawn(process.execPath, [WRANGLER, ...args], {
     cwd: API_DIR,
     env: childEnvironment,
     stdio: ["ignore", "pipe", "pipe"],
@@ -88,6 +94,17 @@ function collect(child: ChildProcess): () => string {
   child.stdout?.on("data", append);
   child.stderr?.on("data", append);
   return () => output;
+}
+
+/** Resolves once a one-shot child (a Wrangler command) exits 0; rejects with its output otherwise. */
+async function completes(child: ChildProcess): Promise<void> {
+  const output = collect(child);
+  await new Promise<void>((resolve, reject) => {
+    child.once("exit", (code) => {
+      if (code === 0) resolve();
+      else reject(new Error(`wrangler exited with ${String(code)}:\n${output()}`));
+    });
+  });
 }
 
 /** Resolves once the child prints `ready`; rejects if it exits or takes too long first. */

@@ -10,6 +10,7 @@ catalogMode: strict
 
 catalog:
   "@babel/core": ^7.28.0
+  "@cloudflare/workers-types": ^5.20261127.1
   "@orpc/client": ^1.16.2
   "@orpc/contract": ^1.16.2
   "@orpc/server": ^1.16.2
@@ -24,14 +25,11 @@ catalog:
   "@types/react": ^19.3.0
   "@types/react-dom": ^19.3.0
   "@vitejs/plugin-react": ^6.3.0
+  "@workos-inc/node": ^12.4.0
   babel-plugin-react-compiler: ^1.0.0
   hono: ^4.13.17
-  "@hono/node-server": ^2.1.6
-  "@electric-sql/pglite": ^0.5.14
-  "@types/pg": ^8.23.1
   drizzle-kit: 1.0.0-rc.5
   drizzle-orm: 1.0.0-rc.5
-  pg: ^8.23.1
   knip: ^6.44.2
   # Copy-paste detector (Rust binary), `pnpm duplicates`; config in .jscpd.json.
   jscpd: 5.4.2
@@ -41,6 +39,7 @@ catalog:
   typescript: ^7.0.2
   vite: npm:@voidzero-dev/vite-plus-core@1.5.1
   vite-plus: 1.5.1
+  wrangler: ^4.168.0
   wxt: ^0.21.5
   zod: ^4.6.7
   # Frontend: design system (packages/ui) and web app.
@@ -81,3 +80,9 @@ minimumReleaseAgeExclude:
   - "@voidzero-dev/vite-plus-win32-arm64-msvc@1.5.1"
   - "@voidzero-dev/vite-plus-win32-x64-msvc@1.5.1"
   - vite-plus@1.5.1
+
+# Install scripts allowed to run. Wrangler's runtime (workerd) and bundler (esbuild) fetch and
+# verify their platform binaries in postinstall.
+allowBuilds:
+  esbuild: true
+  workerd: true

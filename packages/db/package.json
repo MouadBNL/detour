@@ -14,14 +14,12 @@
   },
   "dependencies": {
     "@detour/result": "workspace:*",
-    "@electric-sql/pglite": "catalog:",
     "drizzle-orm": "catalog:",
-    "pg": "catalog:",
     "zod": "catalog:"
   },
   "devDependencies": {
+    "@cloudflare/workers-types": "catalog:",
     "@types/node": "catalog:",
-    "@types/pg": "catalog:",
     "drizzle-kit": "catalog:",
     "typescript": "catalog:",
     "vite-plus": "catalog:"
