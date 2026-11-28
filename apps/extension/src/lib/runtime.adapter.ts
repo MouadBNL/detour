@@ -24,6 +24,16 @@ function isExtensionResponse(value: unknown): value is ExtensionResponse {
   return isRecord(value) && typeof value["ok"] === "boolean";
 }
 
+/** Returns this extension's origin prefix (`chrome-extension://<id>/` or `moz-extension://<uuid>/`). */
+export function getExtensionOriginPrefix(): string {
+  return browser.runtime.getURL("");
+}
+
+/** Returns this extension's runtime id. */
+export function getExtensionId(): string {
+  return browser.runtime.id;
+}
+
 /** Sends a typed runtime message to the MV3 background worker/event page. */
 export async function sendExtensionMessage(
   message: ExtensionMessage,

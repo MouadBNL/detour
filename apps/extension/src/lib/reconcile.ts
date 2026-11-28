@@ -1,23 +1,17 @@
 import { ok, type Result } from "@detour/result";
-import { syncReconcileAlarm, type AlarmError } from "./alarms.adapter.ts";
-import { buildBlockedRedirectUrl, projectDnrRules } from "./dnr-projection.ts";
+import { getReconcileAlarmWhenMs, syncReconcileAlarm, type AlarmError } from "./alarms.adapter.ts";
+import { enqueueBackground } from "./background-queue.ts";
+import { projectDnrRules } from "./dnr-projection.ts";
 import {
   getBlockedPageUrl,
+  getDynamicRuleCount,
+  getSessionRuleCount,
   syncDynamicRules,
   syncSessionRules,
   type DnrError,
 } from "./dnr.adapter.ts";
-import {
-  extractWebHostname,
-  hostnameMatchesDomain,
-  nextExpiryMs,
-  normalizeDomain,
-  partitionGrants,
-  type ActiveGrant,
-  type DomainError,
-  type ExpiredGrantContext,
-  type GuardState,
-} from "./guard-state.ts";
+import { computePendingSweep, mergeExpiredHistory, sweepTabsForDomains } from "./expiry-sweep.ts";
+import { nextExpiryMs, partitionGrants, type DomainError, type GuardState } from "./guard-state.ts";
 import type { ExpiredTabAction, ExtensionStatus } from "./messages.ts";
 import { auditSitePermissions, type PermissionsError } from "./permissions.adapter.ts";
 import {
@@ -26,12 +20,7 @@ import {
   writeGuardState,
   type StorageError,
 } from "./storage.adapter.ts";
-import {
-  injectExpiryOverlay,
-  queryOpenTabs,
-  redirectTab,
-  type TabsScriptingError,
-} from "./tabs-scripting.adapter.ts";
+import type { TabsScriptingError } from "./tabs-scripting.adapter.ts";
 
 export type ReconcileError =
   | StorageError
@@ -39,12 +28,15 @@ export type ReconcileError =
   | PermissionsError
   | AlarmError
   | TabsScriptingError
-  | DomainError;
+  | DomainError
+  | { readonly type: "site_not_guarded"; readonly domain: string }
+  | { readonly type: "wrapup_unavailable"; readonly domain: string }
+  | { readonly type: "invalid_duration"; readonly durationMinutes: number }
+  | { readonly type: "reason_too_long"; readonly maxLength: number };
 
 export type ReconcileOptions = {
   readonly nowMs?: number | undefined;
   readonly expiredAction?: ExpiredTabAction | undefined;
-  readonly sweepDomains?: readonly string[] | undefined;
 };
 
 export type ReconcileResult = {
@@ -53,207 +45,174 @@ export type ReconcileResult = {
   readonly sweptTabIds: readonly number[];
 };
 
-const MAX_EXPIRED_HISTORY = 20;
+/** A state transform plus a value the caller wants back once the state is committed. */
+export type GuardStep<X> = { readonly state: GuardState; readonly extra: X };
 
-function mergeExpiredHistory(
-  existing: readonly ExpiredGrantContext[],
-  newlyExpired: readonly ActiveGrant[],
-  nowMs: number,
-): readonly ExpiredGrantContext[] {
-  const fresh: ExpiredGrantContext[] = newlyExpired.map((grant) => ({
-    domain: grant.domain,
-    reason: grant.reason,
-    durationMinutes: Math.max(1, Math.round((grant.expiresAtMs - grant.grantedAtMs) / 60_000)),
-    expiredAtMs: nowMs,
-  }));
-  const freshDomains = new Set(fresh.map((item) => item.domain));
-  const retained = existing.filter((item) => !freshDomains.has(item.domain));
-  return [...fresh, ...retained].slice(0, MAX_EXPIRED_HISTORY);
+const RETRY_DELAY_MS = 30_000;
+
+async function scheduleRetry(nowMs: number): Promise<void> {
+  // Best effort: if even the alarm fails, the next lifecycle event or message reconciles again.
+  await syncReconcileAlarm(nowMs + RETRY_DELAY_MS);
 }
 
-async function sweepTabsForDomains(
-  domains: readonly string[],
+function prepareNextState(base: GuardState, nowMs: number) {
+  const { active, expired } = partitionGrants(base.grants, nowMs);
+  const expiredDomains = expired.map((grant) => grant.domain);
+  const withGrants: GuardState = {
+    ...base,
+    grants: active,
+    lastExpired:
+      expired.length > 0 ? mergeExpiredHistory(base.lastExpired, expired, nowMs) : base.lastExpired,
+  };
+  const state: GuardState = {
+    ...withGrants,
+    pendingSweepDomains: computePendingSweep(withGrants, expiredDomains),
+  };
+  return { state, expiredDomains };
+}
+
+async function sweepPending(
+  state: GuardState,
   blockedPageUrl: string,
   action: ExpiredTabAction,
-): Promise<Result<readonly number[], TabsScriptingError>> {
-  if (domains.length === 0) return ok([]);
-  const openTabs = await queryOpenTabs();
-  if (!openTabs.ok) return openTabs;
-
-  const sweptTabIds: number[] = [];
-  for (const tab of openTabs.value) {
-    const hostname = extractWebHostname(tab.url);
-    if (!hostname) continue;
-    const matched = domains.some((domain) => hostnameMatchesDomain(hostname, domain));
-    if (!matched) continue;
-
-    if (action === "overlay") {
-      const injected = await injectExpiryOverlay(tab.id);
-      if (injected.ok) {
-        sweptTabIds.push(tab.id);
-        continue;
-      }
-    }
-    const redirected = await redirectTab(tab.id, buildBlockedRedirectUrl(blockedPageUrl, tab.url));
-    if (redirected.ok) {
-      sweptTabIds.push(tab.id);
-    }
+): Promise<
+  Result<
+    { readonly state: GuardState; readonly sweptTabIds: readonly number[] },
+    TabsScriptingError | StorageError
+  >
+> {
+  const swept = await sweepTabsForDomains(state.pendingSweepDomains, blockedPageUrl, action);
+  if (!swept.ok) return swept;
+  const { failedDomains, sweptTabIds } = swept.value;
+  if (failedDomains.length === state.pendingSweepDomains.length) {
+    return ok({ state, sweptTabIds });
   }
-  return ok(sweptTabIds);
+  const persisted = await writeGuardState({ ...state, pendingSweepDomains: failedDomains });
+  if (!persisted.ok) return persisted;
+  return ok({ state: persisted.value, sweptTabIds });
+}
+
+function alarmTarget(state: GuardState, nowMs: number): number | null {
+  const expiry = nextExpiryMs(state.grants, nowMs);
+  if (state.pendingSweepDomains.length === 0) return expiry;
+  const retryAt = nowMs + RETRY_DELAY_MS;
+  return expiry === null ? retryAt : Math.min(expiry, retryAt);
 }
 
 /**
- * Idempotently reconciles stored state into DNR dynamic/session rules, expiry alarms, storage
- * access isolation, permission audits, and open-tab sweeps for expired grants.
+ * Commits `base` in one step: expires grants, syncs DNR rules first (storage is left untouched on
+ * failure so expired grants are retried), persists, sweeps pending tabs, and syncs the alarm.
+ * Callers must run inside `enqueueBackground`.
  */
-export async function reconcile(
-  options: ReconcileOptions = {},
+async function commitGuardState(
+  base: GuardState,
+  options: ReconcileOptions,
 ): Promise<Result<ReconcileResult, ReconcileError>> {
   const nowMs = options.nowMs ?? Date.now();
-  const expiredAction = options.expiredAction ?? "overlay";
-
   const storageAccess = await ensureTrustedStorageAccess();
   if (!storageAccess.ok) return storageAccess;
 
-  const stored = await readGuardState();
-  if (!stored.ok) return stored;
-
-  const { active, expired } = partitionGrants(stored.value.grants, nowMs);
-  let state: GuardState = stored.value;
-  if (expired.length > 0) {
-    const nextState: GuardState = {
-      ...stored.value,
-      grants: active,
-      lastExpired: mergeExpiredHistory(stored.value.lastExpired, expired, nowMs),
-    };
-    const persisted = await writeGuardState(nextState);
-    if (!persisted.ok) return persisted;
-    state = persisted.value;
-  }
-
-  const permissionAudit = await auditSitePermissions(state.sites);
-  if (!permissionAudit.ok) return permissionAudit;
-
+  const { state, expiredDomains } = prepareNextState(base, nowMs);
   const blockedPageUrl = getBlockedPageUrl();
   const projection = projectDnrRules(state, blockedPageUrl, nowMs);
 
   const dynamicRuleCount = await syncDynamicRules(projection.dynamicRules);
-  if (!dynamicRuleCount.ok) return dynamicRuleCount;
-
+  if (!dynamicRuleCount.ok) {
+    await scheduleRetry(nowMs);
+    return dynamicRuleCount;
+  }
   const sessionRuleCount = await syncSessionRules(projection.sessionRules);
-  if (!sessionRuleCount.ok) return sessionRuleCount;
+  if (!sessionRuleCount.ok) {
+    await scheduleRetry(nowMs);
+    return sessionRuleCount;
+  }
+  const persisted = await writeGuardState(state);
+  if (!persisted.ok) {
+    await scheduleRetry(nowMs);
+    return persisted;
+  }
 
-  const nextAlarmAtMs = await syncReconcileAlarm(nextExpiryMs(state.grants, nowMs));
+  const swept = await sweepPending(state, blockedPageUrl, options.expiredAction ?? "overlay");
+  if (!swept.ok) {
+    await scheduleRetry(nowMs);
+    return swept;
+  }
+  const finalState = swept.value.state;
+
+  const nextAlarmAtMs = await syncReconcileAlarm(alarmTarget(finalState, nowMs));
   if (!nextAlarmAtMs.ok) return nextAlarmAtMs;
 
-  const expiredDomains = expired.map((grant) => grant.domain);
-  const domainsToSweep = state.paused
-    ? []
-    : [...new Set([...expiredDomains, ...(options.sweepDomains ?? [])])];
-
-  const sweptTabIds = await sweepTabsForDomains(domainsToSweep, blockedPageUrl, expiredAction);
-  if (!sweptTabIds.ok) return sweptTabIds;
+  const sites = await auditSitePermissions(finalState.sites);
+  if (!sites.ok) return sites;
 
   return ok({
     status: {
-      state,
-      grantedDomains: permissionAudit.value.grantedDomains,
-      revokedDomains: permissionAudit.value.revokedDomains,
+      state: finalState,
+      sites: sites.value,
       storageAccess: storageAccess.value,
       dynamicRuleCount: dynamicRuleCount.value,
       sessionRuleCount: sessionRuleCount.value,
       nextAlarmAtMs: nextAlarmAtMs.value,
     },
     expiredDomains,
-    sweptTabIds: sweptTabIds.value,
+    sweptTabIds: swept.value.sweptTabIds,
   });
 }
 
-/** Updates pause state and reconciles DNR rules immediately. */
-export async function setPausedState(
-  paused: boolean,
-  nowMs?: number,
-): Promise<Result<ReconcileResult, ReconcileError>> {
+/** Reads, transforms and commits guard state without enqueueing (caller holds the queue). */
+export async function commitGuardStep<X>(
+  options: ReconcileOptions,
+  transform: (state: GuardState) => Result<GuardStep<X>, ReconcileError>,
+): Promise<Result<ReconcileResult & { readonly extra: X }, ReconcileError>> {
   const stored = await readGuardState();
   if (!stored.ok) return stored;
-  const written = await writeGuardState({ ...stored.value, paused });
-  if (!written.ok) return written;
-  return reconcile({ nowMs });
+  const step = transform(stored.value);
+  if (!step.ok) return step;
+  const committed = await commitGuardState(step.value.state, options);
+  if (!committed.ok) return committed;
+  return ok({ ...committed.value, extra: step.value.extra });
 }
 
-/** Adds a normalized domain to the guarded list and reconciles DNR rules. */
-export async function addGuardedSite(
-  rawDomain: string,
-  nowMs?: number,
-): Promise<Result<ReconcileResult, ReconcileError>> {
-  const normalized = normalizeDomain(rawDomain);
-  if (!normalized.ok) return normalized;
-
-  const stored = await readGuardState();
-  if (!stored.ok) return stored;
-
-  const exists = stored.value.sites.some((site) => site.domain === normalized.value);
-  const sites = exists ? stored.value.sites : [...stored.value.sites, { domain: normalized.value }];
-  const written = await writeGuardState({ ...stored.value, sites });
-  if (!written.ok) return written;
-  return reconcile({ nowMs });
-}
-
-/** Removes a domain from the guarded list and clears any active grant for it. */
-export async function removeGuardedSite(
-  rawDomain: string,
-  nowMs?: number,
-): Promise<Result<ReconcileResult, ReconcileError>> {
-  const normalized = normalizeDomain(rawDomain);
-  if (!normalized.ok) return normalized;
-
-  const stored = await readGuardState();
-  if (!stored.ok) return stored;
-
-  const nextState: GuardState = {
-    ...stored.value,
-    sites: stored.value.sites.filter((site) => site.domain !== normalized.value),
-    grants: stored.value.grants.filter((grant) => grant.domain !== normalized.value),
-  };
-  const written = await writeGuardState(nextState);
-  if (!written.ok) return written;
-  return reconcile({ nowMs });
+/** Runs one serialized read → transform → DNR sync → persist → sweep → alarm step. */
+export function runGuardStep<X>(
+  options: ReconcileOptions,
+  transform: (state: GuardState) => Result<GuardStep<X>, ReconcileError>,
+): Promise<Result<ReconcileResult & { readonly extra: X }, ReconcileError>> {
+  return enqueueBackground(() => commitGuardStep(options, transform));
 }
 
 /**
- * Persists an active grant and awaits DNR session allow-rule installation before returning,
- * preventing redirect loops when `blocked.html` navigates back to the target URL.
+ * Idempotently reconciles stored state into DNR dynamic/session rules, the expiry alarm, and
+ * open-tab sweeps for expired grants (retrying sweeps that failed earlier).
  */
-export async function grantDomainAccess(input: {
-  readonly domain: string;
-  readonly durationMinutes: number;
-  readonly reason: string;
-  readonly nowMs?: number;
-}): Promise<Result<ReconcileResult & { readonly expiresAtMs: number }, ReconcileError>> {
-  const normalized = normalizeDomain(input.domain);
-  if (!normalized.ok) return normalized;
+export async function reconcile(
+  options: ReconcileOptions = {},
+): Promise<Result<ReconcileResult, ReconcileError>> {
+  return runGuardStep(options, (state) => ok({ state, extra: null }));
+}
 
-  const nowMs = input.nowMs ?? Date.now();
-  const clampedMinutes = Math.max(0.1, Math.min(240, input.durationMinutes));
-  const expiresAtMs = nowMs + Math.round(clampedMinutes * 60_000);
-
-  const stored = await readGuardState();
-  if (!stored.ok) return stored;
-
-  const remainingGrants = stored.value.grants.filter((grant) => grant.domain !== normalized.value);
-  const nextGrant: ActiveGrant = {
-    domain: normalized.value,
-    reason: input.reason.trim(),
-    grantedAtMs: nowMs,
-    expiresAtMs,
-  };
-  const written = await writeGuardState({
-    ...stored.value,
-    grants: [...remainingGrants, nextGrant],
+/** Reports current status strictly read-only: no storage writes, DNR updates, or tab sweeps. */
+export async function readExtensionStatus(): Promise<Result<ExtensionStatus, ReconcileError>> {
+  return enqueueBackground(async (): Promise<Result<ExtensionStatus, ReconcileError>> => {
+    const storageAccess = await ensureTrustedStorageAccess();
+    if (!storageAccess.ok) return storageAccess;
+    const state = await readGuardState();
+    if (!state.ok) return state;
+    const sites = await auditSitePermissions(state.value.sites);
+    if (!sites.ok) return sites;
+    const dynamicRuleCount = await getDynamicRuleCount();
+    if (!dynamicRuleCount.ok) return dynamicRuleCount;
+    const sessionRuleCount = await getSessionRuleCount();
+    if (!sessionRuleCount.ok) return sessionRuleCount;
+    const nextAlarmAtMs = await getReconcileAlarmWhenMs();
+    if (!nextAlarmAtMs.ok) return nextAlarmAtMs;
+    return ok({
+      state: state.value,
+      sites: sites.value,
+      storageAccess: storageAccess.value,
+      dynamicRuleCount: dynamicRuleCount.value,
+      sessionRuleCount: sessionRuleCount.value,
+      nextAlarmAtMs: nextAlarmAtMs.value,
+    });
   });
-  if (!written.ok) return written;
-
-  const reconciled = await reconcile({ nowMs });
-  if (!reconciled.ok) return reconciled;
-  return ok({ ...reconciled.value, expiresAtMs });
 }

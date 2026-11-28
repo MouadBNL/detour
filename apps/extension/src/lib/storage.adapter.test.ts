@@ -27,6 +27,7 @@ describe("storage.adapter", () => {
         },
       ],
       lastExpired: [],
+      pendingSweepDomains: [],
     };
     const written = await writeGuardState(state);
     expect(written).toEqual({ ok: true, value: state });

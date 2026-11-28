@@ -9,6 +9,8 @@ export type ActiveGrant = {
   readonly reason: string;
   readonly grantedAtMs: number;
   readonly expiresAtMs: number;
+  /** True for the one-time 2-minute wrap-up pass, so its expiry keeps the wrap-up consumed. */
+  readonly wrapup?: true;
 };
 
 export type ExpiredGrantContext = {
@@ -16,6 +18,7 @@ export type ExpiredGrantContext = {
   readonly reason: string;
   readonly durationMinutes: number;
   readonly expiredAtMs: number;
+  readonly wrapupUsed: boolean;
 };
 
 export type GuardState = {
@@ -23,6 +26,8 @@ export type GuardState = {
   readonly sites: readonly GuardedSite[];
   readonly grants: readonly ActiveGrant[];
   readonly lastExpired: readonly ExpiredGrantContext[];
+  /** Guarded domains whose expired-grant tab sweep has not completed yet (retried on reconcile). */
+  readonly pendingSweepDomains: readonly string[];
 };
 
 export type DomainError = {
@@ -35,13 +40,14 @@ export const DEFAULT_GUARD_STATE: GuardState = {
   sites: [],
   grants: [],
   lastExpired: [],
+  pendingSweepDomains: [],
 };
 
 const HOSTNAME_PATTERN = /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)+$/u;
 
 /** Normalizes user input (`https://News.YCombinator.com/newest` or `example.com`) to a domain. */
 export function normalizeDomain(input: string): Result<string, DomainError> {
-  const trimmed = input.trim().toLowerCase();
+  const trimmed = input.trim().toLowerCase().replace(/^\*\./u, "");
   if (!trimmed) return err({ type: "invalid_domain", raw: input });
   const withScheme = trimmed.includes("://") ? trimmed : `https://${trimmed}`;
   if (!URL.canParse(withScheme)) return err({ type: "invalid_domain", raw: input });
@@ -65,6 +71,21 @@ export function hostnameMatchesDomain(hostname: string, domain: string): boolean
   const normalizedHost = hostname.toLowerCase();
   const normalizedDomain = domain.toLowerCase();
   return normalizedHost === normalizedDomain || normalizedHost.endsWith(`.${normalizedDomain}`);
+}
+
+/** Returns the most specific guarded site covering `host` (longest matching domain), or null. */
+export function findMatchingGuardedSite(
+  host: string,
+  sites: readonly GuardedSite[],
+): GuardedSite | null {
+  let best: GuardedSite | null = null;
+  for (const site of sites) {
+    if (!hostnameMatchesDomain(host, site.domain)) continue;
+    if (best === null || site.domain.length > best.domain.length) {
+      best = site;
+    }
+  }
+  return best;
 }
 
 /** Extracts the hostname from an http(s) URL string, or returns null for non-web URLs. */
@@ -140,7 +161,8 @@ function parseGrants(raw: unknown): readonly ActiveGrant[] {
     }
     const normalized = normalizeDomain(domain);
     if (!normalized.ok) continue;
-    result.push({ domain: normalized.value, reason, grantedAtMs, expiresAtMs });
+    const grant: ActiveGrant = { domain: normalized.value, reason, grantedAtMs, expiresAtMs };
+    result.push(entry["wrapup"] === true ? { ...grant, wrapup: true } : grant);
   }
   return result;
 }
@@ -164,9 +186,26 @@ function parseLastExpired(raw: unknown): readonly ExpiredGrantContext[] {
     }
     const normalized = normalizeDomain(domain);
     if (!normalized.ok) continue;
-    result.push({ domain: normalized.value, reason, durationMinutes, expiredAtMs });
+    result.push({
+      domain: normalized.value,
+      reason,
+      durationMinutes,
+      expiredAtMs,
+      wrapupUsed: entry["wrapupUsed"] === true,
+    });
   }
   return result;
+}
+
+function parseDomainList(raw: unknown): readonly string[] {
+  if (!Array.isArray(raw)) return [];
+  const result = new Set<string>();
+  for (const entry of raw) {
+    if (typeof entry !== "string") continue;
+    const normalized = normalizeDomain(entry);
+    if (normalized.ok) result.add(normalized.value);
+  }
+  return [...result];
 }
 
 /** Validates untrusted storage payloads into a well-typed `GuardState`. */
@@ -178,5 +217,6 @@ export function parseGuardState(raw: unknown): GuardState {
     sites: parseSites(raw["sites"]),
     grants: parseGrants(raw["grants"]),
     lastExpired: parseLastExpired(raw["lastExpired"]),
+    pendingSweepDomains: parseDomainList(raw["pendingSweepDomains"]),
   };
 }

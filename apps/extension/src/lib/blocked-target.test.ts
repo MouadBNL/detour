@@ -37,4 +37,33 @@ describe("parseBlockedTarget", () => {
       error: { type: "invalid_url", raw: "javascript:alert(1)" },
     });
   });
+
+  it("keeps the fragment of a verbatim target url", () => {
+    expect(parseBlockedTarget("?url=https://example.com/page?a=1#section-2")).toEqual({
+      ok: true,
+      value: { host: "example.com", href: "https://example.com/page?a=1#section-2" },
+    });
+  });
+
+  it("uses the outer host when the target itself carries a nested ?url=", () => {
+    expect(parseBlockedTarget("?url=https://example.com/out?url=https://evil.com/x")).toEqual({
+      ok: true,
+      value: { host: "example.com", href: "https://example.com/out?url=https://evil.com/x" },
+    });
+  });
+
+  it("does not let an unencoded &url= in the target override the host", () => {
+    expect(parseBlockedTarget("?url=https://example.com/a?x=1&url=https://evil.com")).toEqual({
+      ok: true,
+      value: { host: "example.com", href: "https://example.com/a?x=1&url=https://evil.com" },
+    });
+  });
+
+  it("decodes a percent-encoded target that contains its own query and fragment", () => {
+    const target = "https://sub.example.com/feed?q=a&b=c#top";
+    expect(parseBlockedTarget(`?url=${encodeURIComponent(target)}`)).toEqual({
+      ok: true,
+      value: { host: "sub.example.com", href: target },
+    });
+  });
 });

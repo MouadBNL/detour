@@ -12,7 +12,7 @@ async function runReconcile(trigger: string): Promise<void> {
     );
     return;
   }
-  console.warn(`Detour reconcile failed (${trigger}): ${result.error.type}`);
+  console.warn(`Detour reconcile failed (${trigger}): ${result.error.type}`, result.error);
 }
 
 export default defineBackground(() => {

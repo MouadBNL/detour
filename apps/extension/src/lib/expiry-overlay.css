@@ -26,9 +26,12 @@
   --detour-line: light-dark(oklch(0.2 0.01 286 / 0.12), oklch(1 0 0 / 0.12));
   --detour-accent: light-dark(oklch(0.54 0.16 276), oklch(0.58 0.15 276));
   --detour-accent-fg: oklch(0.99 0 0);
+  --detour-danger: light-dark(oklch(0.52 0.19 27), oklch(0.72 0.16 27));
+  --detour-danger-surface: light-dark(oklch(0.96 0.03 27), oklch(0.27 0.06 27));
 }
 
 .detour-card {
+  outline: none;
   box-sizing: border-box;
   width: min(400px, calc(100vw - 32px));
   padding: 20px;
@@ -89,4 +92,33 @@
   background: var(--detour-accent);
   color: var(--detour-accent-fg);
   text-align: center;
+}
+
+.detour-btn:focus-visible {
+  outline: 2px solid var(--detour-accent);
+  outline-offset: 2px;
+}
+
+.detour-btn:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.detour-card[aria-busy="true"] .detour-btn {
+  cursor: progress;
+}
+
+.detour-error {
+  margin: 0 0 12px;
+  padding: 8px 12px;
+  border-radius: 8px;
+  border: 1px solid var(--detour-danger);
+  background: var(--detour-danger-surface);
+  color: var(--detour-danger);
+  font-size: 12px;
+  line-height: 18px;
+}
+
+.detour-error[hidden] {
+  display: none;
 }

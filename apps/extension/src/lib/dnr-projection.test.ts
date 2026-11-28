@@ -30,6 +30,7 @@ describe("projectDnrRules", () => {
         },
       ],
       lastExpired: [],
+      pendingSweepDomains: [],
     };
 
     const chromeProjection = projectDnrRules(

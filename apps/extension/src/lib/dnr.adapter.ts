@@ -51,3 +51,23 @@ export async function syncSessionRules(
   if (!updated.ok) return err(updated.error);
   return ok(addRules.length);
 }
+
+/** Counts the extension's installed dynamic DNR rules without modifying them. */
+export async function getDynamicRuleCount(): Promise<Result<number, DnrError>> {
+  const existing = await fromPromise(
+    () => browser.declarativeNetRequest.getDynamicRules(),
+    (cause): DnrError => ({ type: "dnr_failed", operation: "getDynamicRules", cause }),
+  );
+  if (!existing.ok) return existing;
+  return ok(existing.value.length);
+}
+
+/** Counts the extension's installed session DNR rules without modifying them. */
+export async function getSessionRuleCount(): Promise<Result<number, DnrError>> {
+  const existing = await fromPromise(
+    () => browser.declarativeNetRequest.getSessionRules(),
+    (cause): DnrError => ({ type: "dnr_failed", operation: "getSessionRules", cause }),
+  );
+  if (!existing.ok) return existing;
+  return ok(existing.value.length);
+}

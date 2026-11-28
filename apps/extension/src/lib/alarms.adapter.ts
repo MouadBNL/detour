@@ -31,3 +31,13 @@ export async function syncReconcileAlarm(
   if (!created.ok) return err(created.error);
   return ok(nextAlarmAtMs);
 }
+
+/** Reads the scheduled time of the reconcile alarm, or null when none is scheduled. */
+export async function getReconcileAlarmWhenMs(): Promise<Result<number | null, AlarmError>> {
+  const alarm = await fromPromise(
+    () => browser.alarms.get(RECONCILE_ALARM_NAME),
+    (cause): AlarmError => ({ type: "alarm_failed", operation: "get", cause }),
+  );
+  if (!alarm.ok) return err(alarm.error);
+  return ok(alarm.value?.scheduledTime ?? null);
+}
